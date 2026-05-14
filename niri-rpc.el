@@ -1198,7 +1198,7 @@ This can happen when:
   ;; Try the cache first.
   (or (gethash window-id niri-rpc--window-rects)
       ;; Compute on the fly if not cached.
-      (when-let ((win (gethash window-id niri-rpc--windows)))
+      (when-let* ((win (gethash window-id niri-rpc--windows)))
         (niri-rpc--compute-window-rect
          window-id
          (niri-rpc-window-layout win)
