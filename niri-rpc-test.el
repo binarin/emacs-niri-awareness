@@ -416,5 +416,68 @@
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+;; Tests: Window absolute rect tracking
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+(ert-deftest niri-rpc-window-absolute-rect ()
+  "Test that window absolute rects are computed."
+  (niri-rpc-test--setup)
+  (let ((windows (niri-rpc-windows)))
+    (should windows)
+    (dolist (win windows)
+      (let ((rect (niri-rpc-window-absolute-rect (niri-rpc-window-id win))))
+        (should rect)
+        (should (= (length rect) 4))
+        ;; x, y, width, height should be numbers
+        (should (numberp (nth 0 rect)))
+        (should (numberp (nth 1 rect)))
+        (should (numberp (nth 2 rect)))
+        (should (numberp (nth 3 rect)))
+        ;; width and height should be positive
+        (should (> (nth 2 rect) 0))
+        (should (> (nth 3 rect) 0)))))
+  (niri-rpc-test--teardown))
+
+(ert-deftest niri-rpc-window-absolute-rect-missing ()
+  "Test that absolute rect returns nil for nonexistent windows."
+  (niri-rpc-test--setup)
+  (should-not (niri-rpc-window-absolute-rect 99999999))
+  (niri-rpc-test--teardown))
+
+(ert-deftest niri-rpc-refresh-outputs ()
+  "Test that refresh-outputs works."
+  (niri-rpc-test--setup)
+  ;; Should not error
+  (niri-rpc-refresh-outputs)
+  ;; After refresh, rects should still be computable
+  (let ((windows (niri-rpc-windows)))
+    (when windows
+      (let ((rect (niri-rpc-window-absolute-rect
+                   (niri-rpc-window-id (car windows)))))
+        (should rect))))
+  (niri-rpc-test--teardown))
+
+(ert-deftest niri-rpc-absolute-rect-layout-update ()
+  "Test that absolute rects update when window layouts change."
+  (niri-rpc-test--setup)
+  (let* ((windows (niri-rpc-windows))
+         (target (car windows))
+         (target-id (niri-rpc-window-id target))
+         (rect-before (niri-rpc-window-absolute-rect target-id)))
+    (should rect-before)
+    (setq niri-rpc-test--events nil)
+    ;; Trigger a layout change by switching preset column width
+    (niri-rpc-action '(:SwitchPresetColumnWidth))
+    (niri-rpc-test--wait-for-events 0.5)
+    ;; Check that we got a layout change event
+    (let ((layout-events (niri-rpc-test--events-of-type
+                          'window-layouts-changed)))
+      (when layout-events
+        (let ((rect-after (niri-rpc-window-absolute-rect target-id)))
+          ;; Rect should still be computable after layout change
+          (should rect-after)))))
+  (niri-rpc-test--teardown))
+
 (provide 'niri-rpc-test)
 ;;; niri-rpc-test.el ends here

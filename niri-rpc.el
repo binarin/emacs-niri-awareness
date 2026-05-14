@@ -193,6 +193,21 @@ Type symbols and their relevant fields:
 (defvar niri-rpc--casts (make-hash-table :test 'eql)
   "Hash table mapping stream-id -> niri-rpc-cast struct.")
 
+;; ── Window absolute position tracking ──────────────────────────────────
+
+(defvar niri-rpc--outputs-cache (make-hash-table :test 'equal)
+  "Hash table mapping output name string -> niri-rpc-output struct.
+Populated via the `Outputs' RPC call.")
+
+(defvar niri-rpc--window-rects (make-hash-table :test 'eql)
+  "Hash table mapping window id -> (x y width height) in virtual coords.
+Each value is a list of four numbers: absolute X, absolute Y,
+width, and height in logical pixels.")
+
+(defvar niri-rpc--output-names-seen nil
+  "List of output name strings from the last WorkspacesChanged event.
+Used to detect output configuration changes.")
+
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;;; JSON parsing helpers
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -721,6 +736,9 @@ is read from the $NIRI_SOCKET environment variable."
   (setq niri-rpc--overview-is-open nil)
   (setq niri-rpc--config-failed nil)
   (clrhash niri-rpc--casts)
+  (clrhash niri-rpc--outputs-cache)
+  (clrhash niri-rpc--window-rects)
+  (setq niri-rpc--output-names-seen nil)
   (setq niri-rpc--async-line-buffer "")
 
   ;; ── Open async event-stream socket ───────────────────────────────────
@@ -743,6 +761,11 @@ is read from the $NIRI_SOCKET environment variable."
 
   ;; Discard the initial Handled reply from the line buffer
   ;; (it's already been consumed by the filter, so nothing to do)
+
+  ;; ── Initialize window position tracking ──────────────────────────────
+  (add-hook 'niri-rpc-event-hook #'niri-rpc--position-event-hook)
+  (niri-rpc--initialize-outputs)
+
   (message "niri-rpc: connected"))
 
 ;;;###autoload
@@ -759,6 +782,9 @@ is read from the $NIRI_SOCKET environment variable."
   (setq niri-rpc--overview-is-open nil)
   (setq niri-rpc--config-failed nil)
   (clrhash niri-rpc--casts)
+  (clrhash niri-rpc--outputs-cache)
+  (clrhash niri-rpc--window-rects)
+  (setq niri-rpc--output-names-seen nil)
   (message "niri-rpc: disconnected"))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1033,6 +1059,166 @@ Example:
       :focus t))))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+;;; Window absolute position tracking
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+(defun niri-rpc--query-outputs ()
+  "Query the niri `Outputs' RPC and populate `niri-rpc--outputs-cache'.
+Returns the cache hash table."
+  (clrhash niri-rpc--outputs-cache)
+  (condition-case _err
+      (let ((outputs (niri-rpc-command '(:Outputs))))
+        (dolist (pair outputs)
+          (let ((name (symbol-name (car pair)))
+                (output (cdr pair)))
+            (puthash name output niri-rpc--outputs-cache))))
+    (error nil))
+  niri-rpc--outputs-cache)
+
+(defun niri-rpc--compute-window-rect (win-id layout workspace-id)
+  "Compute the absolute virtual rect for a window and cache it.
+
+WIN-ID is the window's numeric id.
+LAYOUT is a `niri-rpc-window-layout' struct.
+WORKSPACE-ID is the workspace id the window is on, or nil.
+
+Returns a list (X Y WIDTH HEIGHT) in logical pixels, or nil if
+the rect cannot be computed (e.g. outputs not yet loaded, floating
+window without position, or window not assigned to a workspace)."
+  (if-let* ((workspace-id)
+            (ws (gethash workspace-id niri-rpc--workspaces))
+            (output-name (niri-rpc-workspace-output ws))
+            (output (gethash output-name niri-rpc--outputs-cache))
+            (logical (niri-rpc-output-logical output))
+            (tile-pos (niri-rpc-window-layout-tile-pos-in-workspace-view layout)))
+      (let* ((offset (niri-rpc-window-layout-window-offset-in-tile layout))
+             (win-size (niri-rpc-window-layout-window-size layout))
+             (x (+ (niri-rpc-logical-output-x logical)
+                   (car tile-pos)
+                   (car offset)))
+             (y (+ (niri-rpc-logical-output-y logical)
+                   (cdr tile-pos)
+                   (cdr offset)))
+             (rect (list x y (car win-size) (cdr win-size))))
+        (puthash win-id rect niri-rpc--window-rects)
+        rect)
+    (remhash win-id niri-rpc--window-rects)
+    nil))
+
+(defun niri-rpc--recompute-all-rects ()
+  "Recompute absolute rects for all windows in `niri-rpc--windows'."
+  (when (> (hash-table-count niri-rpc--outputs-cache) 0)
+    (maphash
+     (lambda (win-id win)
+       (niri-rpc--compute-window-rect
+        win-id
+        (niri-rpc-window-layout win)
+        (niri-rpc-window-workspace-id win)))
+     niri-rpc--windows)))
+
+(defun niri-rpc--output-names-from-workspaces (workspaces)
+  "Extract the set of output names from a list of WORKSAPCES structs."
+  (let ((names nil))
+    (dolist (ws workspaces)
+      (let ((name (niri-rpc-workspace-output ws)))
+        (when name
+          (cl-pushnew name names :test #'equal))))
+    (sort names #'string<)))
+
+(defun niri-rpc--initialize-outputs ()
+  "Load output information and compute initial window rects."
+  (niri-rpc--query-outputs)
+  ;; Record current output names from workspaces.
+  (setq niri-rpc--output-names-seen
+        (niri-rpc--output-names-from-workspaces
+         (niri-rpc--hash-values niri-rpc--workspaces)))
+  (niri-rpc--recompute-all-rects))
+
+(defun niri-rpc--position-event-hook (event)
+  "Internal hook to update window absolute rects on niri events.
+
+Handles the following events:
+  `workspaces-changed' — detect output reconfiguration, re-query if needed.
+  `windows-changed' — recompute all rects.
+  `window-opened-or-changed' — recompute rect for the new/changed window.
+  `window-closed' — remove rect from cache.
+  `window-layouts-changed' — recompute rects for windows with changed layouts."
+  (pcase (niri-rpc-event-type event)
+    ('workspaces-changed
+     (let ((new-names
+            (niri-rpc--output-names-from-workspaces
+             (niri-rpc-event-workspaces event))))
+       (unless (equal new-names niri-rpc--output-names-seen)
+         (setq niri-rpc--output-names-seen new-names)
+         (niri-rpc--query-outputs)
+         (niri-rpc--recompute-all-rects))))
+
+    ('windows-changed
+     (niri-rpc--recompute-all-rects))
+
+    ('window-opened-or-changed
+     (let ((win (niri-rpc-event-window event)))
+       (niri-rpc--compute-window-rect
+        (niri-rpc-window-id win)
+        (niri-rpc-window-layout win)
+        (niri-rpc-window-workspace-id win))))
+
+    ('window-closed
+     (remhash (niri-rpc-event-window-id event) niri-rpc--window-rects))
+
+    ('window-layouts-changed
+     (when (> (hash-table-count niri-rpc--outputs-cache) 0)
+       (dolist (pair (niri-rpc-event-layout-changes event))
+         (let* ((win-id (car pair))
+                (layout (cdr pair))
+                (win (gethash win-id niri-rpc--windows)))
+           (when win
+             (niri-rpc--compute-window-rect
+              win-id layout
+              (niri-rpc-window-workspace-id win)))))))))
+
+;;;###autoload
+(defun niri-rpc-window-absolute-rect (window-id)
+  "Return the absolute virtual rectangle of a window.
+
+WINDOW-ID is the numeric id of a window.
+
+Returns a list (X Y WIDTH HEIGHT) in logical pixels in the
+virtual coordinate system, or nil if the rect cannot be computed.
+
+This can happen when:
+  - The window is not assigned to any workspace.
+  - The output for the window's workspace has no logical position.
+  - The window's layout does not include a workspace-view position
+    (e.g. interactively moved windows, or the niri version is too
+    old to provide this data for tiling windows)."
+  (niri-rpc--ensure-connected)
+  ;; Try the cache first.
+  (or (gethash window-id niri-rpc--window-rects)
+      ;; Compute on the fly if not cached.
+      (when-let ((win (gethash window-id niri-rpc--windows)))
+        (niri-rpc--compute-window-rect
+         window-id
+         (niri-rpc-window-layout win)
+         (niri-rpc-window-workspace-id win)))))
+
+;;;###autoload
+(defun niri-rpc-refresh-outputs ()
+  "Re-query niri for output information and recompute window rects.
+
+Use this after changing the output configuration manually (e.g.
+repositioning monitors) when the change wasn't accompanied by a
+WorkspacesChanged event."
+  (interactive)
+  (niri-rpc--ensure-connected)
+  (let ((count-before (hash-table-count niri-rpc--outputs-cache)))
+    (niri-rpc--query-outputs)
+    (let ((count-after (hash-table-count niri-rpc--outputs-cache)))
+      (niri-rpc--recompute-all-rects)
+      (message "niri-rpc: refreshed %d output(s) (was %d)"
+               count-after count-before))))
 
 (provide 'niri-rpc)
 ;;; niri-rpc.el ends here
