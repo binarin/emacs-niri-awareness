@@ -373,11 +373,21 @@ JSON null becomes `:json-null', JSON false becomes `:json-false'."
 
 (defun niri-rpc--handle-event-line (line)
   "Parse a single JSON event LINE and update internal state.
-Runs `niri-rpc-event-hook' after state is updated."
-  (let* ((alist (niri-rpc--json-read line))
-         (event (niri-rpc--apply-event alist)))
-    (when event
-      (run-hook-with-args 'niri-rpc-event-hook event))))
+Runs `niri-rpc-event-hook' after state is updated.
+Silently ignores non-event lines (e.g. the initial Handled reply)."
+  (condition-case err
+      (let* ((alist (niri-rpc--json-read line))
+             (event (niri-rpc--apply-event alist)))
+        (when event
+          (run-hook-with-args 'niri-rpc-event-hook event)))
+    (json-parse-error
+     (lwarn 'niri-rpc :warning
+            "JSON parse error in event stream (ignored): %s"
+            (error-message-string err)))
+    (error
+     (lwarn 'niri-rpc :warning
+            "Error handling event line (ignored): %s"
+            (error-message-string err)))))
 
 (defun niri-rpc--async-filter (proc string)
   "Process filter for the event stream socket.
@@ -568,7 +578,9 @@ Returns nil if the event was not recognized."
   "Mark workspace ID as active.  If FOCUSED, mark it as focused too."
   (let ((ws (gethash id niri-rpc--workspaces)))
     (unless ws
-      (error "niri-rpc: activated workspace %d missing from map" id))
+      (lwarn 'niri-rpc :warning
+             "activated workspace %d missing from map (event arrived before WorkspacesChanged?)" id)
+      (cl-return-from niri-rpc--apply-workspace-activated))
     (let ((output (niri-rpc-workspace-output ws)))
       (maphash
        (lambda (_wid w)
@@ -583,7 +595,9 @@ Returns nil if the event was not recognized."
   "Update active window for WORKSPACE-ID to ACTIVE-WINDOW-ID."
   (let ((ws (gethash workspace-id niri-rpc--workspaces)))
     (unless ws
-      (error "niri-rpc: changed workspace %d missing from map" workspace-id))
+      (lwarn 'niri-rpc :warning
+             "workspace-active-window-changed for unknown workspace %d" workspace-id)
+      (cl-return-from niri-rpc--apply-workspace-active-window-changed))
     (setf (niri-rpc-workspace-active-window-id ws) active-window-id)))
 
 ;; ── Window state updates ────────────────────────────────────────────────

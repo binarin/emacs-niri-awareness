@@ -287,13 +287,22 @@
   (niri-frame-test--teardown))
 
 ;;;###autoload
-(defun niri-frame-test-run-all ()
+(defun niri-frame-test-run-all (&optional results-dir)
   "Run all niri-frame tests sequentially.
+
+If RESULTS-DIR is non-nil, write per-test result files:
+  RESULTS-DIR/<test-name>/result    — `PASS' or `FAIL ...'
+  RESULTS-DIR/<test-name>/messages  — contents of *Messages* after the test
+  RESULTS-DIR/<test-name>/warnings  — contents of *Warnings* after the test
 
 Returns a string with PASS/FAIL lines and a summary, suitable for
 parsing by a shell script."
   (interactive)
-  (let ((tests '("niri-frame-enable-disable"
+  (let ((tests '("niri-frame-tag-format"
+                 "niri-frame-tag-extraction"
+                 "niri-frame-tag-no-match"
+                 "niri-frame-tag-nil-title"
+                 "niri-frame-enable-disable"
                  "niri-frame-enable-requires-connection"
                  "niri-frame-existing-frame-mapped"
                  "niri-frame-frames-alist"
@@ -317,8 +326,15 @@ parsing by a shell script."
       (when niri-rpc--async-process
         (while (accept-process-output niri-rpc--async-process 0.01)))
       (setq niri-rpc--async-process nil)
-      (kill-buffer "*Messages*")
-      (let ((test-sym (intern test-name)))
+      (when (get-buffer "*Messages*")
+        (kill-buffer "*Messages*"))
+      (when (get-buffer "*Warnings*")
+        (kill-buffer "*Warnings*"))
+      (let ((test-sym (intern test-name))
+            (test-dir (when results-dir
+                        (expand-file-name test-name results-dir))))
+        (when test-dir
+          (make-directory test-dir t))
         (condition-case err
             (let ((stats (ert test-sym)))
               (if (and stats
@@ -326,20 +342,46 @@ parsing by a shell script."
                        (= (ert--stats-failed-expected stats) 0))
                   (progn
                     (cl-incf passed)
-                    (push (format "PASS %s" test-name) output))
+                    (push (format "PASS %s" test-name) output)
+                    (when test-dir
+                      (write-region "PASS" nil
+                                    (expand-file-name "result" test-dir))))
                 (progn
                   (cl-incf failed)
-                  (push (format "FAIL %s (assertions)" test-name) output))))
+                  (push (format "FAIL %s (assertions)" test-name) output)
+                  (when test-dir
+                    (write-region "FAIL (assertions)" nil
+                                  (expand-file-name "result" test-dir))))))
           (error
            (cl-incf failed)
            (push (format "FAIL %s (error: %s)" test-name
                          (error-message-string err))
-                 output)))
-        ;; After each test, check for process-filter errors in *Messages*
-        (with-current-buffer "*Messages*"
-          (goto-char (point-min))
-          (when (search-forward "error in process filter" nil t)
-            (push (format "  (process-filter errors in log)" ) output)))))
+                 output)
+           (when test-dir
+             (write-region (format "FAIL (error: %s)"
+                                   (error-message-string err))
+                           nil
+                           (expand-file-name "result" test-dir)))))
+        ;; Save *Messages* and *Warnings* after each test
+        (when test-dir
+          (let ((buf (get-buffer "*Messages*")))
+            (when buf
+              (with-current-buffer buf
+                (write-region (point-min) (point-max)
+                              (expand-file-name "messages" test-dir)))))
+          (let ((buf (get-buffer "*Warnings*")))
+            (when buf
+              (with-current-buffer buf
+                (write-region (point-min) (point-max)
+                              (expand-file-name "warnings" test-dir)))))
+          ;; Also check for process-filter errors in *Messages*
+          (let ((buf (get-buffer "*Messages*")))
+            (when buf
+              (with-current-buffer buf
+                (goto-char (point-min))
+                (when (search-forward "error in process filter" nil t)
+                  (push (format "  (process-filter errors: %s)" test-name)
+                        output))))))))
     (setq output (nreverse output))
     (push (format "SUMMARY %d passed, %d failed" passed failed) output)
     (if (> failed 0)
