@@ -171,13 +171,28 @@ tag injection).  Also cleans up internal state."
 ;;; Frame creation / deletion hooks
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+(defun niri-frame--connection-alive-p ()
+  "Return non-nil if the niri event stream connection is alive."
+  (and niri-rpc--async-process
+       (eq (process-status niri-rpc--async-process) 'open)))
+
 (defun niri-frame--on-frame-created (frame)
   "Called when a new FRAME is created.
-Injects a unique tag into the frame's title."
+Injects a unique tag into the frame's title.
+
+If the niri event stream has died, disables frame tracking silently
+(rather than leaving stale tags in frame titles)."
   (when niri-frame--enabled
-    (let* ((counter (niri-frame--next-counter))
-           (tag (niri-frame--make-tag counter)))
-      (niri-frame--inject-tag frame tag))))
+    (if (niri-frame--connection-alive-p)
+        (let* ((counter (niri-frame--next-counter))
+               (tag (niri-frame--make-tag counter)))
+          (niri-frame--inject-tag frame tag))
+      ;; Connection lost — disable tracking so we don't leave
+      ;; tags stuck in frame titles.  niri-frame-disable cleans
+      ;; up all state (hooks, hash tables, existing frame titles).
+      (lwarn 'niri-frame :warning
+             "niri event stream lost; disabling frame tracking")
+      (niri-frame-disable))))
 
 (defun niri-frame--on-frame-deleted (frame)
   "Called when FRAME is deleted.
@@ -229,7 +244,10 @@ Returns the matched frame, or nil if no match."
 Handles:
   `windows-changed'     — scan all windows for tagged Emacs frames.
   `window-opened-or-changed' — check if the window matches a tagged frame.
-  `window-closed'       — clean up mapping if a tracked window is closed."
+  `window-closed'       — clean up mapping if a tracked window is closed.
+
+Guard: if frame tracking has been disabled (e.g. due to connection
+loss), silently ignores the event."
   (when niri-frame--enabled
     (pcase (niri-rpc-event-type event)
       ('windows-changed

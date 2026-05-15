@@ -278,6 +278,19 @@ Example:
             (should (niri-frame-visible--advice (lambda (_frame) t) (selected-frame)))))
       (niri-frame-visible-test--restore-outputs))))
 
+(ert-deftest niri-frame-visible-advice-graceful-error ()
+  "Advice passes through when geometry lookup signals an error.
+
+Simulates the case where `niri-rpc-window-absolute-rect' errors
+(e.g. because the niri connection was lost).  The advice must
+catch the error and return the original result, NOT propagate
+it — `frame-visible-p' is called frequently by Emacs display
+code and must never crash."
+  (cl-letf (((symbol-function 'niri-frame-niri-id) (lambda (_frame) 42))
+            ((symbol-function 'niri-rpc-window-absolute-rect)
+             (lambda (_id) (error "niri-rpc: not connected"))))
+    (should (niri-frame-visible--advice (lambda (_frame) t) (selected-frame)))))
+
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;; Tests: Minor mode (integration, needs niri connection)
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -541,6 +554,7 @@ Returns a string with PASS/FAIL lines and a summary."
                  "niri-frame-visible-advice-not-visible"
                  "niri-frame-visible-advice-visible"
                  "niri-frame-visible-advice-edge-case-equal-threshold"
+                 "niri-frame-visible-advice-graceful-error"
                  "niri-frame-visible-mode-enable-disable"
                  "niri-frame-visible-mode-disables-advice"
                  "niri-frame-visible-mapped-frame-is-visible"

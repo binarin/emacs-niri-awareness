@@ -130,20 +130,30 @@ Calls the original function, then filters the result:
     geometry is available and the frame is not sufficiently
     visible (per `niri-frame-visible-threshold'), the return value
     is changed to nil.  If the geometry is unavailable (e.g. older
-    niri without tile position info), the original non-nil result
-    is passed through unchanged."
+    niri without tile position info, niri connection lost), the
+    original non-nil result is passed through unchanged.
+
+All errors in the geometry check are caught and silently degrade
+to the original `frame-visible-p' result.  This ensures that a
+stale or missing niri connection never breaks Emacs display code
+(which calls `frame-visible-p' frequently)."
   (let* ((frame (car args))
          (original-result (apply orig-fun args)))
     (if original-result
-        ;; Original says visible — check niri geometry.
-        (if-let* ((niri-id (niri-frame-niri-id frame))
-                  (rect (niri-rpc-window-absolute-rect niri-id)))
-            ;; We have geometry info: check actual visibility.
-            ;; Return t only if sufficiently visible; nil otherwise.
-            (niri-frame-visible--rect-visible-p rect)
-          ;; No geometry info available (older niri, floating window,
-          ;; or frame not yet mapped) — trust the original result.
-          original-result)
+        (condition-case nil
+            ;; Original says visible — check niri geometry.
+            (if-let* ((niri-id (niri-frame-niri-id frame))
+                      (rect (niri-rpc-window-absolute-rect niri-id)))
+                ;; We have geometry info: check actual visibility.
+                ;; Return t only if sufficiently visible; nil otherwise.
+                (niri-frame-visible--rect-visible-p rect)
+              ;; No geometry info available (older niri, floating window,
+              ;; or frame not yet mapped) — trust the original result.
+              original-result)
+          (error
+           ;; niri-rpc connection lost or other error — degrade
+           ;; gracefully to the original result.
+           original-result))
       ;; Original says not visible — pass through.
       nil)))
 
