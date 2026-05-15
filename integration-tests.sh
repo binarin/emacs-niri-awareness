@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run niri-frame tests in an isolated embedded niri instance.
+# Run all niri-emacs integration tests in an isolated embedded niri instance.
 #
 # Starts niri in embedded (nested) mode with a generated config that
-# auto-starts an Emacs daemon.  Then runs the full test suite, captures
-# per-test results in a directory, and cleans up.
+# auto-starts an Emacs daemon.  Then runs all test suites (niri-rpc,
+# niri-frame, niri-frame-visible), captures per-test results in a
+# directory, and cleans up.
 #
 # Usage:
-#   ./test-niri-frame.sh                          # default socket: niri-frame-test
-#   ./test-niri-frame.sh my-socket                # custom emacsclient socket
-#   ./test-niri-frame.sh --keep-running           # keep niri+emacs alive after tests
-#   NIRI_BIN=… ./test-niri-frame.sh               # custom niri binary
-#   NIRI_CMD_PREFIX=… ./test-niri-frame.sh        # nix run prefix etc.
+#   ./integration-tests.sh                        # default socket: niri-frame-test
+#   ./integration-tests.sh my-socket              # custom emacsclient socket
+#   ./integration-tests.sh --keep-running         # keep niri+emacs alive after tests
+#   NIRI_BIN=… ./integration-tests.sh             # custom niri binary
+#   NIRI_CMD_PREFIX=… ./integration-tests.sh      # nix run prefix etc.
 #
 # Environment variables:
 #   NIRI_BIN         Path to niri binary (default: auto-detected)
@@ -178,8 +179,9 @@ sleep 0.5
 # ── Run tests via emacsclient ─────────────────────────────────────────
 
 echo ""
-echo "=== Running niri-frame test suite ==="
+echo "=== Running all integration test suites ==="
 
+# Run both test suites in a single emacsclient invocation.
 # emacsclient captures the return value as a Lisp string with literal \n.
 raw="$(emacsclient -s "$SOCKET" --eval "
 (condition-case err
@@ -187,8 +189,13 @@ raw="$(emacsclient -s "$SOCKET" --eval "
       (mapc (function load-file)
             (list \"$SCRIPT_DIR/niri-rpc.el\"
                   \"$SCRIPT_DIR/niri-frame.el\"
-                  \"$SCRIPT_DIR/niri-frame-test.el\"))
-      (niri-frame-test-run-all \"$RESULTS_DIR\"))
+                  \"$SCRIPT_DIR/niri-frame-visible.el\"
+                  \"$SCRIPT_DIR/niri-frame-test.el\"
+                  \"$SCRIPT_DIR/niri-frame-visible-test.el\"))
+      (concat
+       (niri-frame-test-run-all \"$RESULTS_DIR\")
+       \"\n\"
+       (niri-frame-visible-test-run-all \"$RESULTS_DIR\")))
   (error
    (format \"FATAL: %s\" (error-message-string err))))" 2>&1)"
 

@@ -3,12 +3,12 @@
 ## Quick start
 
 ```bash
-./test-niri-frame.sh                    # default socket: niri-frame-test
-./test-niri-frame.sh my-socket          # custom emacsclient socket
-./test-niri-frame.sh --keep-running     # keep niri+emacs alive after tests
-NIRI_BIN=/path/to/niri ./test-niri-frame.sh  # custom niri binary
-NIRI_CMD_PREFIX="nix run ... --" ./test-niri-frame.sh  # nix prefix
-TIMEOUT=20 ./test-niri-frame.sh         # custom startup timeout
+./integration-tests.sh                    # default socket: niri-frame-test
+./integration-tests.sh my-socket          # custom emacsclient socket
+./integration-tests.sh --keep-running     # keep niri+emacs alive after tests
+NIRI_BIN=/path/to/niri ./integration-tests.sh  # custom niri binary
+NIRI_CMD_PREFIX="nix run ... --" ./integration-tests.sh  # nix prefix
+TIMEOUT=20 ./integration-tests.sh         # custom startup timeout
 ```
 
 The script:
@@ -81,7 +81,7 @@ emacsclient -s pi --eval "
 ### Quick access: keep the test environment alive
 
 ```bash
-./test-niri-frame.sh --keep-running
+./integration-tests.sh --keep-running
 ```
 
 This leaves niri and the Emacs daemon running after tests complete. You can
@@ -215,7 +215,7 @@ niri-rpc--connected
 *before every test* to ensure isolation. This means you don't need to worry
 about leftover state from previous tests.
 
-The `test-niri-frame.sh` script also verifies that the Emacs it found
+The `integration-tests.sh` script also verifies that the Emacs it found
 truly belongs to the niri it started (by checking `NIRI_SOCKET` env var).
 This prevents accidentally running tests against an existing daemon.
 
