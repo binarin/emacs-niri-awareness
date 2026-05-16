@@ -12,6 +12,7 @@ set -euo pipefail
 #   ./integration-tests.sh                        # default socket: niri-frame-test
 #   ./integration-tests.sh my-socket              # custom emacsclient socket
 #   ./integration-tests.sh --keep-running         # keep niri+emacs alive after tests
+#   ./integration-tests.sh --reuse-running        # use emacs from a previous --keep-running
 #   ./integration-tests.sh --test TEST-NAME       # run a single integration test
 #   ./integration-tests.sh my-socket --test TEST-NAME
 #   NIRI_BIN=… ./integration-tests.sh             # custom niri binary
@@ -26,6 +27,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KEEP_RUNNING="${KEEP_RUNNING:-}"
+REUSE_RUNNING="${REUSE_RUNNING:-}"
 SOCKET="niri-frame-test"
 TIMEOUT="${TIMEOUT:-15}"
 RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/test-results}"
@@ -35,6 +37,7 @@ TEST_NAME=""              # single test to run (empty = run all)
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --keep-running) KEEP_RUNNING=1; shift ;;
+        --reuse-running) REUSE_RUNNING=1; shift ;;
         -s) SOCKET="$2"; shift 2 ;;
         --test|-t) TEST_NAME="$2"; shift 2 ;;
         *) SOCKET="$1"; shift ;;
@@ -44,6 +47,40 @@ done
 if [[ -n "$TEST_NAME" ]]; then
     echo "single test:   $TEST_NAME"
 fi
+
+# ── Check for a running Emacs from a previous --keep-running ───────
+
+EMACS_RUNNING=0
+if emacsclient -s "$SOCKET" -e t &>/dev/null; then
+    # Verify it's a test Emacs (has NIRI_SOCKET in its environment).
+    NIRI_SOCKET_CHECK="$(emacsclient -s "$SOCKET" --eval "(or (getenv \"NIRI_SOCKET\") \"unset\")" 2>&1)"
+    if [[ "$NIRI_SOCKET_CHECK" != '"unset"' ]]; then
+        EMACS_RUNNING=1
+    fi
+fi
+
+if [[ "$EMACS_RUNNING" -eq 1 && -z "${REUSE_RUNNING:-}" ]]; then
+    echo "ERROR: Emacs daemon already running at socket '$SOCKET'." >&2
+    echo "       This is probably from a previous --keep-running invocation." >&2
+    echo "" >&2
+    echo "  Reuse it:   ./integration-tests.sh --reuse-running" >&2
+    echo "  Kill it:    emacsclient -s $SOCKET -e '(kill-emacs)'" >&2
+    echo "  New socket: ./integration-tests.sh other-name" >&2
+    exit 2
+fi
+
+if [[ "$EMACS_RUNNING" -eq 1 ]]; then
+    echo "reuse:         using existing emacs+niri at socket '$SOCKET'"
+fi
+
+# ── Clean previous results (always) ───────────────────────────────────
+
+rm -rf "$RESULTS_DIR"
+mkdir -p "$RESULTS_DIR"
+
+# ── Niri startup (skip if --reuse-running) ───────────────────────────
+
+if [[ "$EMACS_RUNNING" -eq 0 ]]; then
 
 # ── Resolve niri command ──────────────────────────────────────────────
 
@@ -69,11 +106,6 @@ echo "wayland:       $WAYLAND_DISPLAY"
 echo "socket:        $SOCKET"
 echo "results:       $RESULTS_DIR"
 [[ -n "${KEEP_RUNNING:-}" ]] && echo "keep-running:  yes (niri+emacs stay alive after tests)"
-
-# ── Clean previous results ────────────────────────────────────────────
-
-rm -rf "$RESULTS_DIR"
-mkdir -p "$RESULTS_DIR"
 
 # ── Temporary directory for niri runtime ──────────────────────────────
 
@@ -183,6 +215,17 @@ fi
 
 # Give Emacs and niri a moment to settle event streams
 sleep 0.5
+
+else
+    # ── Reuse mode: skip niri startup ──────────────────────────────────
+
+    echo "socket:        $SOCKET"
+    echo "results:       $RESULTS_DIR"
+
+    # Don't kill anything we didn't start.
+    cleanup() { true; }
+    trap cleanup EXIT
+fi
 
 # ── Run tests via emacsclient ─────────────────────────────────────────
 

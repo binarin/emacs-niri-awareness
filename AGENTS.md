@@ -12,6 +12,7 @@
 ./integration-tests.sh --test single-test
 ./integration-tests.sh my-socket          # custom emacsclient socket
 ./integration-tests.sh --keep-running     # keep niri+emacs alive after tests
+./integration-tests.sh --reuse-running    # reuse emacs from a previous --keep-running
 NIRI_BIN=/path/to/niri ./integration-tests.sh  # custom niri binary
 NIRI_CMD_PREFIX="nix run ... --" ./integration-tests.sh  # nix prefix
 TIMEOUT=20 ./integration-tests.sh         # custom startup timeout
@@ -23,6 +24,9 @@ The script:
 3. Waits for Emacs to be ready (default 15s timeout)
 4. Runs all 46 tests (18 frame + 28 visible) via emacsclient
    (or a single test when `--test NAME` is given)
+5. Refuses to start if an emacs from a previous --keep-running is
+   detected at the target socket.  Use --reuse-running to skip niri
+   startup and run tests against the existing environment.
 5. Writes per-test result files to `test-results/<test-name>/`
 6. Cleans up the niri process and temp directory
 
@@ -107,7 +111,24 @@ emacsclient -s pi --eval "
 ./integration-tests.sh --keep-running
 ```
 
-This leaves niri and the Emacs daemon running after tests complete. You can
+This leaves niri and the Emacs daemon running after tests complete.
+To run additional tests against the same environment, use `--reuse-running`:
+
+```bash
+# One-shot: keep alive and run a single test
+./integration-tests.sh --keep-running -t niri-frame-visible-toggle-floating
+
+# Later: reuse for another test (skips niri startup)
+./integration-tests.sh --reuse-running -t niri-frame-visible-advice-hidden-tab
+
+# Or run the full suite against the existing environment
+./integration-tests.sh --reuse-running
+```
+
+The script refuses to start unless `--reuse-running` is given when an
+emacs from a previous `--keep-running` is detected at the target socket.
+
+You can
 then open frames interactively and run ad-hoc evaluations. The script prints
 the socket name and PID — connect with:
 
