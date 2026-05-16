@@ -318,6 +318,7 @@ parsing by a shell script."
                  "niri-frame-niri-id-missing"))
         (passed 0)
         (failed 0)
+        (skipped 0)
         (output nil))
     (dolist (test-name tests)
       ;; Clean slate before each test: disconnect, drain pending events,
@@ -340,12 +341,19 @@ parsing by a shell script."
               (if (and stats
                        (= (ert--stats-failed-unexpected stats) 0)
                        (= (ert--stats-failed-expected stats) 0))
-                  (progn
-                    (cl-incf passed)
-                    (push (format "PASS %s" test-name) output)
-                    (when test-dir
-                      (write-region "PASS" nil
-                                    (expand-file-name "result" test-dir))))
+                  (if (> (ert--stats-skipped stats) 0)
+                      (progn
+                        (cl-incf skipped)
+                        (push (format "SKIP %s" test-name) output)
+                        (when test-dir
+                          (write-region "SKIP" nil
+                                        (expand-file-name "result" test-dir))))
+                    (progn
+                      (cl-incf passed)
+                      (push (format "PASS %s" test-name) output)
+                      (when test-dir
+                        (write-region "PASS" nil
+                                      (expand-file-name "result" test-dir)))))
                 (progn
                   (cl-incf failed)
                   (push (format "FAIL %s (assertions)" test-name) output)
@@ -383,7 +391,7 @@ parsing by a shell script."
                   (push (format "  (process-filter errors: %s)" test-name)
                         output))))))))
     (setq output (nreverse output))
-    (push (format "SUMMARY %d passed, %d failed" passed failed) output)
+    (push (format "SUMMARY %d passed, %d failed, %d skipped" passed failed skipped) output)
     (if (> failed 0)
         (push "EXIT_FAIL" output)
       (push "EXIT_OK" output))

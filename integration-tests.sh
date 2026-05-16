@@ -277,11 +277,14 @@ if [[ -n "$TEST_NAME" ]]; then
           ;; Run setup → test → teardown.
           (funcall setup-fn)
           (unwind-protect
-              (progn
-                (ert test-name)
-                (with-temp-file results-file (insert \"PASS\"))
-                ;; Return PASS line for the shell output.
-                (format \"PASS %s\" test-name))
+              (let ((stats (ert test-name)))
+                (if (> (ert--stats-skipped stats) 0)
+                    (progn
+                      (with-temp-file results-file (insert \"SKIP\"))
+                      (format \"SKIP %s\" test-name))
+                  (progn
+                    (with-temp-file results-file (insert \"PASS\"))
+                    (format \"PASS %s\" test-name))))
             (funcall teardown-fn)))))
   (error
    (let ((results-dir \"$RESULTS_DIR\")
@@ -333,6 +336,7 @@ exit_code=0
 while IFS= read -r line; do
     case "$line" in
         PASS\ *)   echo "  $line" ;;
+        SKIP\ *)   echo "  $line" ;;
         FAIL\ *)   echo "  $line"; exit_code=1 ;;
         SUMMARY\ *) echo ""; echo "$line" ;;
         EXIT_FAIL) exit_code=1 ;;

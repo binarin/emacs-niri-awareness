@@ -214,6 +214,21 @@ width, and height in logical pixels.")
   "List of output name strings from the last WorkspacesChanged event.
 Used to detect output configuration changes.")
 
+;; ── Feature detection ────────────────────────────────────────────────
+
+(defvar niri-rpc--has-tile-pos nil
+  "Non-nil if niri provides `tile_pos_in_workspace_view' in window layouts.
+Detected automatically during `niri-rpc-connect'.")
+
+(defvar niri-rpc--has-visible-in-column nil
+  "Non-nil if niri provides `is_visible_in_column' field in window layouts.
+Detected automatically during `niri-rpc-connect'.
+When nil, niri-rpc-window-layout-is-visible-in-column always returns t.")
+
+(defvar niri-rpc--is-visible-in-column-field-seen nil
+  "Internal: set to t when `is_visible_in_column' key is seen in raw JSON.
+Used during `niri-rpc-connect' for feature detection.")
+
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;;; JSON parsing helpers
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -277,7 +292,9 @@ JSON null becomes `:json-null', JSON false becomes `:json-false'."
        (cons (elt v 0) (elt v 1)))
      :is-visible-in-column
      ;; Older niri versions don't send this field; default to t.
-     (not (eq :json-false (alist-get 'is_visible_in_column alist))))))
+     (prog1 (not (eq :json-false (alist-get 'is_visible_in_column alist)))
+       (when (assq 'is_visible_in_column alist)
+         (setq niri-rpc--is-visible-in-column-field-seen t))))))
 
 (defun niri-rpc--parse-window (alist)
   "Parse a window alist into a niri-rpc-window struct."
@@ -763,6 +780,9 @@ is read from the $NIRI_SOCKET environment variable."
   (clrhash niri-rpc--window-rects)
   (setq niri-rpc--output-names-seen nil)
   (setq niri-rpc--async-line-buffer "")
+  (setq niri-rpc--has-tile-pos nil)
+  (setq niri-rpc--has-visible-in-column nil)
+  (setq niri-rpc--is-visible-in-column-field-seen nil)
 
   ;; ── Open async event-stream socket ───────────────────────────────────
   (let ((proc (make-network-process
@@ -784,6 +804,9 @@ is read from the $NIRI_SOCKET environment variable."
 
   ;; Discard the initial Handled reply from the line buffer
   ;; (it's already been consumed by the filter, so nothing to do)
+
+  ;; ── Detect niri features from initial state ─────────────────────────
+  (niri-rpc--detect-features)
 
   ;; ── Initialize window position tracking ──────────────────────────────
   (add-hook 'niri-rpc-event-hook #'niri-rpc--position-event-hook)
@@ -808,6 +831,8 @@ is read from the $NIRI_SOCKET environment variable."
   (clrhash niri-rpc--outputs-cache)
   (clrhash niri-rpc--window-rects)
   (setq niri-rpc--output-names-seen nil)
+  (setq niri-rpc--has-tile-pos nil)
+  (setq niri-rpc--has-visible-in-column nil)
   (message "niri-rpc: disconnected"))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1082,6 +1107,53 @@ Example:
       :focus t))))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+;;; Feature detection
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+(defun niri-rpc--detect-features ()
+  "Detect which niri IPC features are available.
+
+Must be called after the initial `WindowsChanged' and
+`WorkspacesChanged' events have been received (i.e. after
+`niri-rpc-connect' has waited for initial state).
+
+Sets `niri-rpc--has-tile-pos' and
+`niri-rpc--has-visible-in-column' based on what the connected
+niri instance provides."
+  ;; Detect is_visible_in_column support
+  (setq niri-rpc--has-visible-in-column
+        niri-rpc--is-visible-in-column-field-seen)
+  ;; Detect tile_pos_in_workspace_view support.
+  ;; Check all non-floating windows — if any have a non-nil
+  ;; tile_pos_in_workspace_view, the feature is available.
+  (setq niri-rpc--has-tile-pos nil)
+  (maphash
+   (lambda (_id win)
+     (unless (niri-rpc-window-is-floating win)
+       (when (niri-rpc-window-layout-tile-pos-in-workspace-view
+              (niri-rpc-window-layout win))
+         (setq niri-rpc--has-tile-pos t))))
+   niri-rpc--windows))
+
+;;;###autoload
+(defun niri-rpc-has-tile-pos-p ()
+  "Return non-nil if niri provides tile position in window layouts.
+
+When nil, `niri-rpc-window-absolute-rect' is unavailable for
+tiling windows — only floating windows with explicit positions
+can have their rect computed."
+  niri-rpc--has-tile-pos)
+
+;;;###autoload
+(defun niri-rpc-has-visible-in-column-p ()
+  "Return non-nil if niri provides `is_visible_in_column' in window layouts.
+
+When nil, niri-rpc-window-layout-is-visible-in-column always
+returns t, and tabbed-column visibility detection is not
+available."
+  niri-rpc--has-visible-in-column)
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;;; Window absolute position tracking

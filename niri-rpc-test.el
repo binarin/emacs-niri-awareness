@@ -451,6 +451,8 @@
 (ert-deftest niri-rpc-window-absolute-rect ()
   "Test that window absolute rects are computed."
   (niri-rpc-test--setup)
+  (unless niri-rpc--has-tile-pos
+    (ert-skip "niri does not provide tile_pos_in_workspace_view"))
   (let ((windows (niri-rpc-windows)))
     (should windows)
     (dolist (win windows)
@@ -476,6 +478,8 @@
 (ert-deftest niri-rpc-refresh-outputs ()
   "Test that refresh-outputs works."
   (niri-rpc-test--setup)
+  (unless niri-rpc--has-tile-pos
+    (ert-skip "niri does not provide tile_pos_in_workspace_view"))
   ;; Should not error
   (niri-rpc-refresh-outputs)
   ;; After refresh, rects should still be computable
@@ -489,6 +493,8 @@
 (ert-deftest niri-rpc-absolute-rect-layout-update ()
   "Test that absolute rects update when window layouts change."
   (niri-rpc-test--setup)
+  (unless niri-rpc--has-tile-pos
+    (ert-skip "niri does not provide tile_pos_in_workspace_view"))
   (let* ((windows (niri-rpc-windows))
          (target (car windows))
          (target-id (niri-rpc-window-id target))

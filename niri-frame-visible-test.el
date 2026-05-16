@@ -404,6 +404,8 @@ The advice should fall through to the geometry check."
 (ert-deftest niri-frame-visible-mapped-frame-is-visible ()
   "A mapped frame on the active workspace should be visible."
   (niri-frame-visible-test--setup)
+  (unless niri-rpc--has-tile-pos
+    (ert-skip "niri does not provide tile_pos_in_workspace_view"))
   (let ((frame (selected-frame))
         (niri-id (niri-frame-niri-id (selected-frame))))
     ;; Frame must be mapped for visibility check to work
@@ -427,6 +429,8 @@ After creating frames in new columns, niri auto-scrolls to show the most
 recently created column.  Frames in earlier columns may be off-screen.
 Our advice should detect this based on window geometry."
   (niri-frame-visible-test--setup)
+  (unless niri-rpc--has-tile-pos
+    (ert-skip "niri does not provide tile_pos_in_workspace_view"))
   (let ((frame1 (selected-frame))
         (frame2 (make-frame '((name . "niri-visible-test-2"))))
         (frame3 (make-frame '((name . "niri-visible-test-3")))))
@@ -464,6 +468,8 @@ Our advice should detect this based on window geometry."
 Creates 3 frames, scrolls to the leftmost, verifies it's visible,
 then scrolls right to push it off-screen, then scrolls back."
   (niri-frame-visible-test--setup)
+  (unless niri-rpc--has-tile-pos
+    (ert-skip "niri does not provide tile_pos_in_workspace_view"))
   (let ((frame1 (selected-frame))
         frame2 frame3)
     (setq frame2 (make-frame '((name . "niri-visible-scroll-2"))))
@@ -528,6 +534,8 @@ Creates two frames in separate columns, consumes one into the other's
 column to put them in the same column, toggles tabbed display, and
 verifies that the non-active frame is reported as not visible."
   (niri-frame-visible-test--setup)
+  (unless niri-rpc--has-visible-in-column
+    (ert-skip "niri does not provide is_visible_in_column"))
   (let ((frame1 (selected-frame))
         frame2)
     (setq frame2 (make-frame '((name . "niri-visible-tabbed-2"))))
@@ -593,6 +601,8 @@ verifies that the non-active frame is reported as not visible."
 Creates two frames in the same column, toggles tabbed, then switches
 tabs and verifies that visibility follows the active tab."
   (niri-frame-visible-test--setup)
+  (unless niri-rpc--has-visible-in-column
+    (ert-skip "niri does not provide is_visible_in_column"))
   (let ((frame1 (selected-frame))
         frame2)
     (setq frame2 (make-frame '((name . "niri-visible-tabbed-switch-2"))))
@@ -660,6 +670,8 @@ tabs and verifies that visibility follows the active tab."
 Creates two frames in the same column, toggles tabbed on, then off,
 and verifies that both frames are visible again in normal display mode."
   (niri-frame-visible-test--setup)
+  (unless niri-rpc--has-visible-in-column
+    (ert-skip "niri does not provide is_visible_in_column"))
   (let ((frame1 (selected-frame))
         frame2)
     (setq frame2 (make-frame '((name . "niri-visible-untabbed-2"))))
@@ -725,6 +737,8 @@ When a window is toggled to floating, its tile-pos-in-workspace-view
 may become nil, meaning the rect can't be computed.  The advice
 should pass through the original `frame-visible-p' result (t)."
   (niri-frame-visible-test--setup)
+  (unless niri-rpc--has-tile-pos
+    (ert-skip "niri does not provide tile_pos_in_workspace_view"))
   (let ((frame (selected-frame))
         (niri-id (niri-frame-niri-id (selected-frame))))
     (should niri-id)
@@ -777,6 +791,8 @@ geometry, not workspace activation — so `frame-visible-p' should
 return t even on inactive workspaces (consistent with Emacs's
 behavior for virtual desktops)."
   (niri-frame-visible-test--setup)
+  (unless niri-rpc--has-tile-pos
+    (ert-skip "niri does not provide tile_pos_in_workspace_view"))
   (let ((frame (selected-frame))
         (niri-id (niri-frame-niri-id (selected-frame))))
     (should niri-id)
@@ -850,6 +866,7 @@ Returns a string with PASS/FAIL lines and a summary."
                  "niri-frame-visible-tabbed-column-untabbed"))
         (passed 0)
         (failed 0)
+        (skipped 0)
         (output nil))
     (dolist (test-name tests)
       ;; Clean slate before each test
@@ -871,12 +888,19 @@ Returns a string with PASS/FAIL lines and a summary."
               (if (and stats
                        (= (ert--stats-failed-unexpected stats) 0)
                        (= (ert--stats-failed-expected stats) 0))
-                  (progn
-                    (cl-incf passed)
-                    (push (format "PASS %s" test-name) output)
-                    (when test-dir
-                      (write-region "PASS" nil
-                                    (expand-file-name "result" test-dir))))
+                  (if (> (ert--stats-skipped stats) 0)
+                      (progn
+                        (cl-incf skipped)
+                        (push (format "SKIP %s" test-name) output)
+                        (when test-dir
+                          (write-region "SKIP" nil
+                                        (expand-file-name "result" test-dir))))
+                    (progn
+                      (cl-incf passed)
+                      (push (format "PASS %s" test-name) output)
+                      (when test-dir
+                        (write-region "PASS" nil
+                                      (expand-file-name "result" test-dir)))))
                 (progn
                   (cl-incf failed)
                   (push (format "FAIL %s (assertions)" test-name) output)
@@ -908,7 +932,7 @@ Returns a string with PASS/FAIL lines and a summary."
                 (write-region (point-min) (point-max)
                               (expand-file-name "warnings" test-dir))))))))
     (setq output (nreverse output))
-    (push (format "SUMMARY %d passed, %d failed" passed failed) output)
+    (push (format "SUMMARY %d passed, %d failed, %d skipped" passed failed skipped) output)
     (if (> failed 0)
         (push "EXIT_FAIL" output)
       (push "EXIT_OK" output))
