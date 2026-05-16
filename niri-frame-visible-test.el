@@ -555,10 +555,24 @@ verifies that the non-active frame is reported as not visible."
             (niri-frame-visible-test--wait-for-events 0.5)
 
             ;; Toggle tabbed display
-            (condition-case nil
-                (niri-rpc-action '(:ToggleColumnTabbedDisplay))
-              (error (message "niri-tabbed: ToggleColumnTabbedDisplay not supported")))
-            (niri-frame-visible-test--wait-for-events 1.0)
+            ;; Ensure tabbed display.
+            ;; toggle once for non-tabbed → tabbed;
+            ;; if already tabbed (stale state from prior test),
+            ;; toggle twice: tabbed → untabbed → tabbed.
+            (let ((already-hidden (not (niri-rpc-window-layout-is-visible-in-column
+                                        (niri-rpc-window-layout
+                                         (gethash id2 niri-rpc--windows))))))
+              (condition-case nil
+                  (niri-rpc-action '(:ToggleColumnTabbedDisplay))
+                (error (message "niri-tabbed: ToggleColumnTabbedDisplay not supported")))
+              (niri-frame-visible-test--wait-for-events 0.5)
+              (when already-hidden
+                (message "niri-tabbed: column was already tabbed, toggling again")
+                (condition-case nil
+                    (niri-rpc-action '(:ToggleColumnTabbedDisplay))
+                  (error (message "niri-tabbed: second toggle failed")))
+                (niri-frame-visible-test--wait-for-events 0.5)))
+            (niri-frame-visible-test--wait-for-events 0.5)
 
             ;; After toggling tabbed, only the active frame should be visible.
             ;; frame1 was focused first and is the active tab.
@@ -569,7 +583,7 @@ verifies that the non-active frame is reported as not visible."
               ;; The active tab (frame1) should be visible
               (should v1)
               ;; The hidden tab (frame2) should NOT be visible
-              (should-not v2)))))
+              (should-not v2))))
       (delete-frame frame2)))
   (niri-frame-visible-test--teardown))
 
@@ -600,11 +614,24 @@ tabs and verifies that visibility follows the active tab."
               (error (message "niri-tabbed-switch: ConsumeWindowIntoColumn failed")))
             (niri-frame-visible-test--wait-for-events 0.5)
 
-            ;; Toggle tabbed display
-            (condition-case nil
-                (niri-rpc-action '(:ToggleColumnTabbedDisplay))
-              (error (message "niri-tabbed-switch: ToggleColumnTabbedDisplay not supported")))
-            (niri-frame-visible-test--wait-for-events 1.0)
+            ;; Ensure tabbed display.
+            ;; toggle once for non-tabbed → tabbed;
+            ;; if already tabbed (stale state from prior test),
+            ;; toggle twice: tabbed → untabbed → tabbed.
+            (let ((already-hidden (not (niri-rpc-window-layout-is-visible-in-column
+                                        (niri-rpc-window-layout
+                                         (gethash id2 niri-rpc--windows))))))
+              (condition-case nil
+                  (niri-rpc-action '(:ToggleColumnTabbedDisplay))
+                (error (message "niri-tabbed-switch: ToggleColumnTabbedDisplay not supported")))
+              (niri-frame-visible-test--wait-for-events 0.5)
+              (when already-hidden
+                (message "niri-tabbed-switch: column was already tabbed, toggling again")
+                (condition-case nil
+                    (niri-rpc-action '(:ToggleColumnTabbedDisplay))
+                  (error (message "niri-tabbed-switch: second toggle failed")))
+                (niri-frame-visible-test--wait-for-events 0.5)))
+            (niri-frame-visible-test--wait-for-events 0.5)
 
             ;; frame1 is the active tab, frame2 is hidden
             (should (frame-visible-p frame1))
@@ -614,15 +641,16 @@ tabs and verifies that visibility follows the active tab."
             (condition-case nil
                 (niri-rpc-action '(:FocusWindowDown))
               (error (message "niri-tabbed-switch: FocusWindowDown failed")))
-            (niri-frame-visible-test--wait-for-events 1.0)
+            (niri-frame-visible-test--wait-for-events 2.0)
 
             ;; Now frame2 should be visible and frame1 hidden
+            ;; Re-read layout after events to ensure fresh data
             (let ((v1 (frame-visible-p frame1))
                   (v2 (frame-visible-p frame2)))
-              (message "niri-tabbed-switch: after switch frame1=%S frame2=%S"
-                       v1 v2)
+              (message "niri-tabbed-switch: after switch frame1=%S frame2=%S (ids: %d %d)"
+                       v1 v2 (niri-frame-niri-id frame1) (niri-frame-niri-id frame2))
               (should v2)
-              (should-not v1)))))
+              (should-not v1))))
       (delete-frame frame2)))
   (niri-frame-visible-test--teardown))
 
@@ -653,11 +681,23 @@ and verifies that both frames are visible again in normal display mode."
               (error (message "niri-untabbed: ConsumeWindowIntoColumn failed")))
             (niri-frame-visible-test--wait-for-events 0.5)
 
-            ;; Toggle tabbed ON
-            (condition-case nil
-                (niri-rpc-action '(:ToggleColumnTabbedDisplay))
-              (error (message "niri-untabbed: ToggleColumnTabbedDisplay not supported")))
-            (niri-frame-visible-test--wait-for-events 1.0)
+            ;; Ensure tabbed ON.
+            ;; toggle once for non-tabbed → tabbed;
+            ;; if already tabbed (stale state), toggle twice.
+            (let ((already-hidden (not (niri-rpc-window-layout-is-visible-in-column
+                                        (niri-rpc-window-layout
+                                         (gethash id2 niri-rpc--windows))))))
+              (condition-case nil
+                  (niri-rpc-action '(:ToggleColumnTabbedDisplay))
+                (error (message "niri-untabbed: ToggleColumnTabbedDisplay not supported")))
+              (niri-frame-visible-test--wait-for-events 0.5)
+              (when already-hidden
+                (message "niri-untabbed: column was already tabbed, toggling again")
+                (condition-case nil
+                    (niri-rpc-action '(:ToggleColumnTabbedDisplay))
+                  (error (message "niri-untabbed: second toggle failed")))
+                (niri-frame-visible-test--wait-for-events 0.5)))
+            (niri-frame-visible-test--wait-for-events 0.5)
 
             ;; frame2 should be hidden now
             (should-not (frame-visible-p frame2))
@@ -670,7 +710,7 @@ and verifies that both frames are visible again in normal display mode."
 
             ;; Both frames should be visible again in normal display mode
             (should (frame-visible-p frame1))
-            (should (frame-visible-p frame2)))))
+            (should (frame-visible-p frame2))))
       (delete-frame frame2)))
   (niri-frame-visible-test--teardown))
 
