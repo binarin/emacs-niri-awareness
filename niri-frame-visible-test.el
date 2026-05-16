@@ -291,6 +291,89 @@ code and must never crash."
              (lambda (_id) (error "niri-rpc: not connected"))))
     (should (niri-frame-visible--advice (lambda (_frame) t) (selected-frame)))))
 
+(ert-deftest niri-frame-visible-advice-hidden-tab ()
+  "Advice returns nil when window is hidden in a tabbed column.
+
+When a window has a niri-id but its layout says
+`is-visible-in-column' is nil (hidden tab), the advice must
+return nil even if the original `frame-visible-p' returns t."
+  (let ((niri-frame-visible-test--orig-outputs nil))
+    (unwind-protect
+        (progn
+          (niri-frame-visible-test--mock-outputs
+           '((:name "DP-1" :x 0 :y 0 :width 1920 :height 1080)))
+          ;; Mock: frame has niri-id 42, window is in niri-rpc--windows
+          ;; with layout where is-visible-in-column is nil
+          (let ((hidden-layout (make-niri-rpc-window-layout
+                                :is-visible-in-column nil
+                                :tile-size '(500 . 400)
+                                :window-size '(500 . 400)
+                                :window-offset-in-tile '(0 . 0)
+                                :tile-pos-in-workspace-view '(100 . 100))))
+            (cl-letf (((symbol-function 'niri-frame-niri-id) (lambda (_frame) 42))
+                      ((symbol-function 'gethash)
+                       (lambda (key table)
+                         (when (and (= key 42)
+                                    (eq table niri-rpc--windows))
+                           (make-niri-rpc-window
+                            :id 42
+                            :layout hidden-layout)))))
+              ;; Original says visible, but is_visible_in_column is nil
+              (should-not (niri-frame-visible--advice
+                           (lambda (_frame) t) (selected-frame))))))
+      (niri-frame-visible-test--restore-outputs))))
+
+(ert-deftest niri-frame-visible-advice-visible-in-column ()
+  "Advice returns t when is_visible_in_column is t and geometry is on screen."
+  (let ((niri-frame-visible-test--orig-outputs nil)
+        (niri-frame-visible-threshold 0.5))
+    (unwind-protect
+        (progn
+          (niri-frame-visible-test--mock-outputs
+           '((:name "DP-1" :x 0 :y 0 :width 1920 :height 1080)))
+          (let ((visible-layout (make-niri-rpc-window-layout
+                                 :is-visible-in-column t
+                                 :tile-size '(500 . 400)
+                                 :window-size '(500 . 400)
+                                 :window-offset-in-tile '(0 . 0)
+                                 :tile-pos-in-workspace-view nil)))
+            (cl-letf (((symbol-function 'niri-frame-niri-id) (lambda (_frame) 42))
+                      ((symbol-function 'niri-rpc-window-absolute-rect)
+                       (lambda (_id) '(100 100 500 400)))
+                      ((symbol-function 'gethash)
+                       (lambda (key table)
+                         (when (and (= key 42)
+                                    (eq table niri-rpc--windows))
+                           (make-niri-rpc-window
+                            :id 42
+                            :layout visible-layout)))))
+              ;; Original says visible, is_visible_in_column is t,
+              ;; and geometry is on screen
+              (should (niri-frame-visible--advice
+                       (lambda (_frame) t) (selected-frame))))))
+      (niri-frame-visible-test--restore-outputs))))
+
+(ert-deftest niri-frame-visible-advice-no-window-in-table ()
+  "Advice returns result from geometry check when window not in niri-rpc--windows.
+
+This covers the case where the frame has a niri-id but somehow
+isn't in the niri-rpc--windows hash table (e.g. connection loss).
+The advice should fall through to the geometry check."
+  (let ((niri-frame-visible-test--orig-outputs nil)
+        (niri-frame-visible-threshold 0.5))
+    (unwind-protect
+        (progn
+          (niri-frame-visible-test--mock-outputs
+           '((:name "DP-1" :x 0 :y 0 :width 1920 :height 1080)))
+          (cl-letf (((symbol-function 'niri-frame-niri-id) (lambda (_frame) 42))
+                    ((symbol-function 'niri-rpc-window-absolute-rect)
+                     (lambda (_id) '(100 100 500 400))))
+            ;; Frame has niri-id but not in niri-rpc--windows table.
+            ;; Falls through to geometry check which passes.
+            (should (niri-frame-visible--advice
+                     (lambda (_frame) t) (selected-frame)))))
+      (niri-frame-visible-test--restore-outputs))))
+
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;; Tests: Minor mode (integration, needs niri connection)
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -435,6 +518,163 @@ then scrolls right to push it off-screen, then scrolls back."
   (niri-frame-visible-test--teardown))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+;; Tests: Tabbed column visibility (integration, needs niri connection)
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+(ert-deftest niri-frame-visible-tabbed-column-hidden ()
+  "Test that hidden tabs in a tabbed column are not visible.
+
+Creates two frames in separate columns, consumes one into the other's
+column to put them in the same column, toggles tabbed display, and
+verifies that the non-active frame is reported as not visible."
+  (niri-frame-visible-test--setup)
+  (let ((frame1 (selected-frame))
+        frame2)
+    (setq frame2 (make-frame '((name . "niri-visible-tabbed-2"))))
+    (unwind-protect
+        (progn
+          (niri-frame-visible-test--wait-for-mapping 2.0)
+          (let ((id1 (niri-frame-niri-id frame1))
+                (id2 (niri-frame-niri-id frame2)))
+            (should id1)
+            (should id2)
+
+            ;; Both frames should be visible initially (separate columns)
+            (should (frame-visible-p frame1))
+            (should (frame-visible-p frame2))
+
+            ;; Consume frame2 into frame1's column.
+            ;; First focus frame1's niri window, then consume right.
+            (condition-case nil
+                (niri-rpc-action `(:FocusWindow (:id ,id1)))
+              (error (message "niri-tabbed: FocusWindow failed")))
+            (niri-frame-visible-test--wait-for-events 0.5)
+            (condition-case nil
+                (niri-rpc-action '(:ConsumeWindowIntoColumn))
+              (error (message "niri-tabbed: ConsumeWindowIntoColumn failed")))
+            (niri-frame-visible-test--wait-for-events 0.5)
+
+            ;; Toggle tabbed display
+            (condition-case nil
+                (niri-rpc-action '(:ToggleColumnTabbedDisplay))
+              (error (message "niri-tabbed: ToggleColumnTabbedDisplay not supported")))
+            (niri-frame-visible-test--wait-for-events 1.0)
+
+            ;; After toggling tabbed, only the active frame should be visible.
+            ;; frame1 was focused first and is the active tab.
+            (let ((v1 (frame-visible-p frame1))
+                  (v2 (frame-visible-p frame2)))
+              (message "niri-tabbed-hidden: frame1=%S frame2=%S (ids: %d %d)"
+                       v1 v2 id1 id2)
+              ;; The active tab (frame1) should be visible
+              (should v1)
+              ;; The hidden tab (frame2) should NOT be visible
+              (should-not v2)))))
+      (delete-frame frame2)))
+  (niri-frame-visible-test--teardown))
+
+(ert-deftest niri-frame-visible-tabbed-column-switch-tabs ()
+  "Test that visibility updates when switching tabs in a tabbed column.
+
+Creates two frames in the same column, toggles tabbed, then switches
+tabs and verifies that visibility follows the active tab."
+  (niri-frame-visible-test--setup)
+  (let ((frame1 (selected-frame))
+        frame2)
+    (setq frame2 (make-frame '((name . "niri-visible-tabbed-switch-2"))))
+    (unwind-protect
+        (progn
+          (niri-frame-visible-test--wait-for-mapping 2.0)
+          (let ((id1 (niri-frame-niri-id frame1))
+                (id2 (niri-frame-niri-id frame2)))
+            (should id1)
+            (should id2)
+
+            ;; Consume frame2 into frame1's column
+            (condition-case nil
+                (niri-rpc-action `(:FocusWindow (:id ,id1)))
+              (error (message "niri-tabbed-switch: FocusWindow failed")))
+            (niri-frame-visible-test--wait-for-events 0.5)
+            (condition-case nil
+                (niri-rpc-action '(:ConsumeWindowIntoColumn))
+              (error (message "niri-tabbed-switch: ConsumeWindowIntoColumn failed")))
+            (niri-frame-visible-test--wait-for-events 0.5)
+
+            ;; Toggle tabbed display
+            (condition-case nil
+                (niri-rpc-action '(:ToggleColumnTabbedDisplay))
+              (error (message "niri-tabbed-switch: ToggleColumnTabbedDisplay not supported")))
+            (niri-frame-visible-test--wait-for-events 1.0)
+
+            ;; frame1 is the active tab, frame2 is hidden
+            (should (frame-visible-p frame1))
+            (should-not (frame-visible-p frame2))
+
+            ;; Switch to frame2's tab by focusing down in the column
+            (condition-case nil
+                (niri-rpc-action '(:FocusWindowDown))
+              (error (message "niri-tabbed-switch: FocusWindowDown failed")))
+            (niri-frame-visible-test--wait-for-events 1.0)
+
+            ;; Now frame2 should be visible and frame1 hidden
+            (let ((v1 (frame-visible-p frame1))
+                  (v2 (frame-visible-p frame2)))
+              (message "niri-tabbed-switch: after switch frame1=%S frame2=%S"
+                       v1 v2)
+              (should v2)
+              (should-not v1)))))
+      (delete-frame frame2)))
+  (niri-frame-visible-test--teardown))
+
+(ert-deftest niri-frame-visible-tabbed-column-untabbed ()
+  "Test that all windows become visible when un-toggling tabbed display.
+
+Creates two frames in the same column, toggles tabbed on, then off,
+and verifies that both frames are visible again in normal display mode."
+  (niri-frame-visible-test--setup)
+  (let ((frame1 (selected-frame))
+        frame2)
+    (setq frame2 (make-frame '((name . "niri-visible-untabbed-2"))))
+    (unwind-protect
+        (progn
+          (niri-frame-visible-test--wait-for-mapping 2.0)
+          (let ((id1 (niri-frame-niri-id frame1))
+                (id2 (niri-frame-niri-id frame2)))
+            (should id1)
+            (should id2)
+
+            ;; Consume frame2 into frame1's column
+            (condition-case nil
+                (niri-rpc-action `(:FocusWindow (:id ,id1)))
+              (error (message "niri-untabbed: FocusWindow failed")))
+            (niri-frame-visible-test--wait-for-events 0.5)
+            (condition-case nil
+                (niri-rpc-action '(:ConsumeWindowIntoColumn))
+              (error (message "niri-untabbed: ConsumeWindowIntoColumn failed")))
+            (niri-frame-visible-test--wait-for-events 0.5)
+
+            ;; Toggle tabbed ON
+            (condition-case nil
+                (niri-rpc-action '(:ToggleColumnTabbedDisplay))
+              (error (message "niri-untabbed: ToggleColumnTabbedDisplay not supported")))
+            (niri-frame-visible-test--wait-for-events 1.0)
+
+            ;; frame2 should be hidden now
+            (should-not (frame-visible-p frame2))
+
+            ;; Toggle tabbed OFF
+            (condition-case nil
+                (niri-rpc-action '(:ToggleColumnTabbedDisplay))
+              (error (message "niri-untabbed: second ToggleColumnTabbedDisplay failed")))
+            (niri-frame-visible-test--wait-for-events 1.0)
+
+            ;; Both frames should be visible again in normal display mode
+            (should (frame-visible-p frame1))
+            (should (frame-visible-p frame2)))))
+      (delete-frame frame2)))
+  (niri-frame-visible-test--teardown))
+
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;; Tests: Floating windows (integration, needs niri connection)
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -555,13 +795,19 @@ Returns a string with PASS/FAIL lines and a summary."
                  "niri-frame-visible-advice-visible"
                  "niri-frame-visible-advice-edge-case-equal-threshold"
                  "niri-frame-visible-advice-graceful-error"
+                 "niri-frame-visible-advice-hidden-tab"
+                 "niri-frame-visible-advice-visible-in-column"
+                 "niri-frame-visible-advice-no-window-in-table"
                  "niri-frame-visible-mode-enable-disable"
                  "niri-frame-visible-mode-disables-advice"
                  "niri-frame-visible-mapped-frame-is-visible"
                  "niri-frame-visible-create-multiple-frames"
                  "niri-frame-visible-toggle-floating"
                  "niri-frame-visible-workspace-switch"
-                 "niri-frame-visible-scroll-off-screen"))
+                 "niri-frame-visible-scroll-off-screen"
+                 "niri-frame-visible-tabbed-column-hidden"
+                 "niri-frame-visible-tabbed-column-switch-tabs"
+                 "niri-frame-visible-tabbed-column-untabbed"))
         (passed 0)
         (failed 0)
         (output nil))

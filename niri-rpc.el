@@ -73,12 +73,18 @@ TILE-SIZE is a cons (width . height).  WINDOW-SIZE is a cons
 (width . height).  POS-IN-SCROLLING-LAYOUT is a cons
 (column-index . tile-index) or nil.  TILE-POS-IN-WORKSPACE-VIEW
 is a cons (x . y) or nil.  WINDOW-OFFSET-IN-TILE is a cons
-(x . y)."
+(x . y).
+
+IS-VISIBLE-IN-COLUMN is non-nil when the window is the active
+(visible) tab in a tabbed column, or when the column is in
+normal (non-tabbed) display mode.  It is nil for hidden
+(background) tabs in a tabbed column."
   pos-in-scrolling-layout
   tile-size
   window-size
   tile-pos-in-workspace-view
-  window-offset-in-tile)
+  window-offset-in-tile
+  is-visible-in-column)
 
 (cl-defstruct niri-rpc-window
   "A toplevel window managed by niri."
@@ -268,7 +274,10 @@ JSON null becomes `:json-null', JSON false becomes `:json-false'."
          (cons (elt pos 0) (elt pos 1))))
      :window-offset-in-tile
      (let ((v (alist-get 'window_offset_in_tile alist)))
-       (cons (elt v 0) (elt v 1))))))
+       (cons (elt v 0) (elt v 1)))
+     :is-visible-in-column
+     ;; Older niri versions don't send this field; default to t.
+     (not (eq :json-false (alist-get 'is_visible_in_column alist))))))
 
 (defun niri-rpc--parse-window (alist)
   "Parse a window alist into a niri-rpc-window struct."

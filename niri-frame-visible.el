@@ -126,12 +126,13 @@ list (a single FRAME argument).
 Calls the original function, then filters the result:
   - When the original returns nil, returns nil unchanged.
   - When the original returns non-nil, checks whether FRAME is
-    actually visible on any niri output.  If the niri window
-    geometry is available and the frame is not sufficiently
-    visible (per `niri-frame-visible-threshold'), the return value
-    is changed to nil.  If the geometry is unavailable (e.g. older
-    niri without tile position info, niri connection lost), the
-    original non-nil result is passed through unchanged.
+    actually visible on any niri output.  First checks if the
+    window is visible in its column (i.e. not a hidden tab in a
+    tabbed column).  Then checks if the window geometry is
+    sufficiently visible (per `niri-frame-visible-threshold').
+    If the geometry is unavailable (e.g. older niri without tile
+    position info, niri connection lost), the original non-nil
+    result is passed through unchanged.
 
 All errors in the geometry check are caught and silently degrade
 to the original `frame-visible-p' result.  This ensures that a
@@ -141,14 +142,20 @@ stale or missing niri connection never breaks Emacs display code
          (original-result (apply orig-fun args)))
     (if original-result
         (condition-case nil
-            ;; Original says visible — check niri geometry.
-            (if-let* ((niri-id (niri-frame-niri-id frame))
-                      (rect (niri-rpc-window-absolute-rect niri-id)))
-                ;; We have geometry info: check actual visibility.
-                ;; Return t only if sufficiently visible; nil otherwise.
-                (niri-frame-visible--rect-visible-p rect)
-              ;; No geometry info available (older niri, floating window,
-              ;; or frame not yet mapped) — trust the original result.
+            ;; Original says visible — check niri visibility.
+            (if-let* ((niri-id (niri-frame-niri-id frame)))
+                (let ((win (gethash niri-id niri-rpc--windows)))
+                  ;; First check column visibility (tabbed columns).
+                  (if (and win
+                           (not (niri-rpc-window-layout-is-visible-in-column
+                                 (niri-rpc-window-layout win))))
+                      ;; Hidden tab in a tabbed column — not visible.
+                      nil
+                    ;; Now check geometry-based visibility.
+                    (if-let* ((rect (niri-rpc-window-absolute-rect niri-id)))
+                        (niri-frame-visible--rect-visible-p rect)
+                      original-result)))
+              ;; No niri-id — trust the original result.
               original-result)
           (error
            ;; niri-rpc connection lost or other error — degrade

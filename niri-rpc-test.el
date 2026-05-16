@@ -249,12 +249,14 @@
                  :tile-size '(100.0 . 200.0)
                  :window-size '(99 . 199)
                  :tile-pos-in-workspace-view nil
-                 :window-offset-in-tile '(0.5 . 0.5))))
+                 :window-offset-in-tile '(0.5 . 0.5)
+                 :is-visible-in-column t)))
     (should (niri-rpc-window-layout-p layout))
     (should (equal (niri-rpc-window-layout-pos-in-scrolling-layout layout)
                    '(1 . 2)))
     (should (equal (niri-rpc-window-layout-tile-size layout)
-                   '(100.0 . 200.0)))))
+                   '(100.0 . 200.0)))
+    (should (niri-rpc-window-layout-is-visible-in-column layout))))
 
 (ert-deftest niri-rpc-struct-window ()
   "Test window struct creation and accessors."
@@ -362,7 +364,33 @@
       (should (equal (niri-rpc-window-layout-pos-in-scrolling-layout layout)
                      '(1 . 2)))
       (should (equal (niri-rpc-window-layout-tile-size layout)
-                     '(100.0 . 200.0))))))
+                     '(100.0 . 200.0)))
+      ;; is_visible_in_column missing from JSON → defaults to t
+      (should (niri-rpc-window-layout-is-visible-in-column layout))))))
+
+(ert-deftest niri-rpc-json-parse-window-layout-is-visible-in-column ()
+  "Test parsing is_visible_in_column field from JSON."
+  ;; Test with is_visible_in_column: false
+  (let* ((json "{\"id\":1,\"layout\":{\"tile_size\":[100.0,200.0],\"window_size\":[99,199],\"window_offset_in_tile\":[0.5,0.5],\"is_visible_in_column\":false}}")
+         (alist (niri-rpc--json-read json))
+         (win (niri-rpc--parse-window alist))
+         (layout (niri-rpc-window-layout win)))
+    (should layout)
+    (should-not (niri-rpc-window-layout-is-visible-in-column layout)))
+  ;; Test with is_visible_in_column: true
+  (let* ((json "{\"id\":2,\"layout\":{\"tile_size\":[100.0,200.0],\"window_size\":[99,199],\"window_offset_in_tile\":[0.5,0.5],\"is_visible_in_column\":true}}")
+         (alist (niri-rpc--json-read json))
+         (win (niri-rpc--parse-window alist))
+         (layout (niri-rpc-window-layout win)))
+    (should layout)
+    (should (niri-rpc-window-layout-is-visible-in-column layout)))
+  ;; Test with is_visible_in_column absent (backward compat)
+  (let* ((json "{\"id\":3,\"layout\":{\"tile_size\":[100.0,200.0],\"window_size\":[99,199],\"window_offset_in_tile\":[0.5,0.5]}}")
+         (alist (niri-rpc--json-read json))
+         (win (niri-rpc--parse-window alist))
+         (layout (niri-rpc-window-layout win)))
+    (should layout)
+    (should (niri-rpc-window-layout-is-visible-in-column layout))))
 
 (ert-deftest niri-rpc-json-parse-workspace ()
   "Test parsing a workspace from JSON."

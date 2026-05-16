@@ -15,7 +15,7 @@ The script:
 1. Starts niri in embedded (nested) mode with a generated config
 2. Niri auto-starts an Emacs daemon
 3. Waits for Emacs to be ready (default 15s timeout)
-4. Runs all 18 tests (4 unit + 14 integration) via emacsclient
+4. Runs all 46 tests (18 frame + 28 visible) via emacsclient
 5. Writes per-test result files to `test-results/<test-name>/`
 6. Cleans up the niri process and temp directory
 
