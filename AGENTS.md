@@ -3,6 +3,10 @@
 ## Quick start
 
 ```bash
+# Unit tests (33 tests, no niri required, fast)
+./run-unit-tests.sh
+
+# Full integration tests (46 tests, requires Wayland + niri)
 ./integration-tests.sh                    # default socket: niri-frame-test
 ./integration-tests.sh my-socket          # custom emacsclient socket
 ./integration-tests.sh --keep-running     # keep niri+emacs alive after tests

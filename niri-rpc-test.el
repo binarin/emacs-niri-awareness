@@ -366,7 +366,7 @@
       (should (equal (niri-rpc-window-layout-tile-size layout)
                      '(100.0 . 200.0)))
       ;; is_visible_in_column missing from JSON → defaults to t
-      (should (niri-rpc-window-layout-is-visible-in-column layout))))))
+      (should (niri-rpc-window-layout-is-visible-in-column layout)))))
 
 (ert-deftest niri-rpc-json-parse-window-layout-is-visible-in-column ()
   "Test parsing is_visible_in_column field from JSON."
