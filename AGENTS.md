@@ -8,6 +8,8 @@
 
 # Full integration tests (46 tests, requires Wayland + niri)
 ./integration-tests.sh                    # default socket: niri-frame-test
+./integration-tests.sh -t single-test     # run a single integration test
+./integration-tests.sh --test single-test
 ./integration-tests.sh my-socket          # custom emacsclient socket
 ./integration-tests.sh --keep-running     # keep niri+emacs alive after tests
 NIRI_BIN=/path/to/niri ./integration-tests.sh  # custom niri binary
@@ -20,6 +22,7 @@ The script:
 2. Niri auto-starts an Emacs daemon
 3. Waits for Emacs to be ready (default 15s timeout)
 4. Runs all 46 tests (18 frame + 28 visible) via emacsclient
+   (or a single test when `--test NAME` is given)
 5. Writes per-test result files to `test-results/<test-name>/`
 6. Cleans up the niri process and temp directory
 
@@ -52,12 +55,28 @@ The startup.el sets `server-name` and calls `server-start`.
 
 ## Running individual tests
 
+Use the `--test` / `-t` flag to run a single integration test:
+
+```bash
+# One test with the normal test environment
+./integration-tests.sh --test niri-frame-visible-tabbed-column-hidden
+
+# With custom socket
+./integration-tests.sh my-socket -t niri-frame-new-frame-pending-then-mapped
+
+# Keep niri+emacs alive after so you can inspect state
+./integration-tests.sh --keep-running -t niri-frame-visible-toggle-floating
+```
+
+The script auto-detects the correct setup/teardown from the test name prefix
+(`niri-frame-visible-*`, `niri-frame-*`, or `niri-rpc-*`).
+
 All tests are run via the `niri-frame-test-run-all` elisp function, which
 handles per-test setup/teardown, result file writing, and *Messages*/*Warnings*
 capture. Invoke via emacsclient:
 
 ```bash
-# Full suite with per-test result dirs
+# Full suite with per-test result dirs (niri-frame tests only, no visible)
 emacsclient -s pi --eval "
 (progn
   (mapc #'load-file '(\"niri-rpc.el\" \"niri-frame.el\" \"niri-frame-test.el\"))

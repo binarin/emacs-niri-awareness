@@ -12,6 +12,8 @@ set -euo pipefail
 #   ./integration-tests.sh                        # default socket: niri-frame-test
 #   ./integration-tests.sh my-socket              # custom emacsclient socket
 #   ./integration-tests.sh --keep-running         # keep niri+emacs alive after tests
+#   ./integration-tests.sh --test TEST-NAME       # run a single integration test
+#   ./integration-tests.sh my-socket --test TEST-NAME
 #   NIRI_BIN=… ./integration-tests.sh             # custom niri binary
 #   NIRI_CMD_PREFIX=… ./integration-tests.sh      # nix run prefix etc.
 #
@@ -27,15 +29,21 @@ KEEP_RUNNING="${KEEP_RUNNING:-}"
 SOCKET="niri-frame-test"
 TIMEOUT="${TIMEOUT:-15}"
 RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/test-results}"
+TEST_NAME=""              # single test to run (empty = run all)
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --keep-running) KEEP_RUNNING=1; shift ;;
         -s) SOCKET="$2"; shift 2 ;;
+        --test|-t) TEST_NAME="$2"; shift 2 ;;
         *) SOCKET="$1"; shift ;;
     esac
 done
+
+if [[ -n "$TEST_NAME" ]]; then
+    echo "single test:   $TEST_NAME"
+fi
 
 # ── Resolve niri command ──────────────────────────────────────────────
 
@@ -179,11 +187,78 @@ sleep 0.5
 # ── Run tests via emacsclient ─────────────────────────────────────────
 
 echo ""
-echo "=== Running all integration test suites ==="
+if [[ -n "$TEST_NAME" ]]; then
+    echo "=== Running single integration test: $TEST_NAME ==="
+else
+    echo "=== Running all integration test suites ==="
+fi
 
-# Run both test suites in a single emacsclient invocation.
-# emacsclient captures the return value as a Lisp string with literal \n.
-raw="$(emacsclient -s "$SOCKET" --eval "
+# Build the elisp to run.
+# When TEST_NAME is set, run a single test with the right setup/teardown.
+if [[ -n "$TEST_NAME" ]]; then
+    elisp="
+(condition-case err
+    (progn
+      (mapc (function load-file)
+            (list \"$SCRIPT_DIR/niri-rpc.el\"
+                  \"$SCRIPT_DIR/niri-frame.el\"
+                  \"$SCRIPT_DIR/niri-frame-visible.el\"
+                  \"$SCRIPT_DIR/niri-rpc-test.el\"
+                  \"$SCRIPT_DIR/niri-frame-test.el\"
+                  \"$SCRIPT_DIR/niri-frame-visible-test.el\"))
+      (let ((test-name \"$TEST_NAME\")
+            (rdir \"$RESULTS_DIR\"))
+        ;; Determine which setup/teardown to use from test name prefix.
+        (let* ((setup-fn
+                (cond
+                 ((string-prefix-p \"niri-frame-visible-\" test-name)
+                  (function niri-frame-visible-test--setup))
+                 ((string-prefix-p \"niri-frame-\" test-name)
+                  (function niri-frame-test--setup))
+                 ((string-prefix-p \"niri-rpc-\" test-name)
+                  (function niri-rpc-test--setup))
+                 (t (error \"Unknown test name prefix: %s\" test-name))))
+               (teardown-fn
+                (cond
+                 ((string-prefix-p \"niri-frame-visible-\" test-name)
+                  (function niri-frame-visible-test--teardown))
+                 ((string-prefix-p \"niri-frame-\" test-name)
+                  (function niri-frame-test--teardown))
+                 ((string-prefix-p \"niri-rpc-\" test-name)
+                  (function niri-rpc-test--teardown))
+                 (t (error \"Unknown test name prefix: %s\" test-name))))
+               (results-file
+                (concat (file-name-as-directory rdir) test-name \"/result\")))
+          ;; Ensure results directory for this test exists.
+          (make-directory (file-name-directory results-file) t)
+          ;; Run setup → test → teardown.
+          (funcall setup-fn)
+          (unwind-protect
+              (progn
+                (ert test-name)
+                (with-temp-file results-file (insert \"PASS\"))
+                ;; Return PASS line for the shell output.
+                (format \"PASS %s\" test-name))
+            (funcall teardown-fn)))))
+  (error
+   (let ((results-dir \"$RESULTS_DIR\")
+         (test-name \"$TEST_NAME\"))
+     (make-directory (concat (file-name-as-directory results-dir) test-name) t)
+     (with-temp-file (concat (file-name-as-directory results-dir) test-name \"/result\")
+       (insert (format \"FAIL %s\" (error-message-string err))))
+     ;; Also try to teardown if possible.
+     (condition-case nil
+         (cond
+          ((string-prefix-p \"niri-frame-visible-\" test-name)
+           (niri-frame-visible-test--teardown))
+          ((string-prefix-p \"niri-frame-\" test-name)
+           (niri-frame-test--teardown))
+          ((string-prefix-p \"niri-rpc-\" test-name)
+           (niri-rpc-test--teardown)))
+       (error nil))
+     (format \"FAIL %s: %s\" test-name (error-message-string err)))))"
+else
+    elisp="
 (condition-case err
     (progn
       (mapc (function load-file)
@@ -197,7 +272,12 @@ raw="$(emacsclient -s "$SOCKET" --eval "
        \"\n\"
        (niri-frame-visible-test-run-all \"$RESULTS_DIR\")))
   (error
-   (format \"FATAL: %s\" (error-message-string err))))" 2>&1)"
+   (format \"FATAL: %s\" (error-message-string err))))"
+fi
+
+# Run tests via emacsclient.
+# emacsclient captures the return value as a Lisp string with literal \n.
+raw="$(emacsclient -s "$SOCKET" --eval "$elisp" 2>&1)"
 
 # Strip opening and closing quotes, convert \\n to real newlines.
 raw="${raw#\"}"
