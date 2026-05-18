@@ -209,17 +209,25 @@ niri window geometry into account.  A frame that is scrolled
 off-screen or otherwise outside the viewport will be reported as
 not visible, even when Emacs normally considers it visible.
 
+Enabling this mode automatically calls `niri-rpc-connect' and
+`niri-frame-enable' if needed — you don't need to call them
+separately.
+
 The fraction of the frame that must be on-screen is controlled by
 `niri-frame-visible-threshold' (default 0.5 = 50%).
 
-This requires an active niri-rpc connection and frame tracking
-enabled via `niri-frame-enable'.  When niri geometry information
-is unavailable (e.g. older niri versions), `frame-visible-p'
-behaves normally."
+When niri geometry information is unavailable (e.g. older niri
+versions), `frame-visible-p' behaves normally."
   :global t
   :group 'niri-frame-visible
   (if track-niri-frame-visibility-mode
-      (advice-add 'frame-visible-p :around #'niri-frame-visible--advice)
+      (progn
+        (unless (and niri-rpc--async-process
+                     (eq (process-status niri-rpc--async-process) 'open))
+          (niri-rpc-connect))
+        (unless niri-frame--enabled
+          (niri-frame-enable))
+        (advice-add 'frame-visible-p :around #'niri-frame-visible--advice))
     (advice-remove 'frame-visible-p #'niri-frame-visible--advice)))
 
 (provide 'niri-frame-visible)
