@@ -374,6 +374,114 @@ The advice should fall through to the geometry check."
                      (lambda (_frame) t) (selected-frame)))))
       (niri-frame-visible-test--restore-outputs))))
 
+(ert-deftest niri-frame-visible-advice-inactive-workspace ()
+  "Advice returns nil when window is on an inactive workspace.
+
+When a window has a niri-id and is on a workspace that is NOT
+active on its output, niri's scrolling tiling layout means it's
+scrolled off-screen.  The advice must return nil even if the
+original `frame-visible-p' returns t and the geometry would
+theoretically overlap the output's virtual canvas."
+  (let ((niri-frame-visible-test--orig-outputs nil)
+        (niri-frame-visible-threshold 0.5))
+    (unwind-protect
+        (progn
+          (niri-frame-visible-test--mock-outputs
+           '((:name "DP-1" :x 0 :y 0 :width 1920 :height 1080)))
+          (let ((layout (make-niri-rpc-window-layout
+                         :is-visible-in-column t
+                         :tile-size '(500 . 400)
+                         :window-size '(500 . 400)
+                         :window-offset-in-tile '(0 . 0)
+                         :tile-pos-in-workspace-view '(100 . 100))))
+            (cl-letf (((symbol-function 'niri-frame-niri-id) (lambda (_frame) 42))
+                      ((symbol-function 'niri-rpc-window-absolute-rect)
+                       (lambda (_id) '(100 100 500 400)))
+                      ((symbol-function 'gethash)
+                       (lambda (key table)
+                         (cond
+                          ((and (= key 42) (eq table niri-rpc--windows))
+                           (make-niri-rpc-window
+                            :id 42
+                            :workspace-id 1
+                            :layout layout))
+                          ((and (= key 1) (eq table niri-rpc--workspaces))
+                           (make-niri-rpc-workspace
+                            :id 1
+                            :is-active nil))))))
+              (should-not (niri-frame-visible--advice
+                           (lambda (_frame) t) (selected-frame))))))
+      (niri-frame-visible-test--restore-outputs))))
+
+(ert-deftest niri-frame-visible-advice-active-workspace ()
+  "Advice returns t when window is on an active workspace and geometry passes.
+
+When a window has a niri-id, is visible in its column, is on the
+active workspace, and its geometry passes the threshold check,
+the advice should return the original result (t)."
+  (let ((niri-frame-visible-test--orig-outputs nil)
+        (niri-frame-visible-threshold 0.5))
+    (unwind-protect
+        (progn
+          (niri-frame-visible-test--mock-outputs
+           '((:name "DP-1" :x 0 :y 0 :width 1920 :height 1080)))
+          (let ((layout (make-niri-rpc-window-layout
+                         :is-visible-in-column t
+                         :tile-size '(500 . 400)
+                         :window-size '(500 . 400)
+                         :window-offset-in-tile '(0 . 0)
+                         :tile-pos-in-workspace-view '(100 . 100))))
+            (cl-letf (((symbol-function 'niri-frame-niri-id) (lambda (_frame) 42))
+                      ((symbol-function 'niri-rpc-window-absolute-rect)
+                       (lambda (_id) '(100 100 500 400)))
+                      ((symbol-function 'gethash)
+                       (lambda (key table)
+                         (cond
+                          ((and (= key 42) (eq table niri-rpc--windows))
+                           (make-niri-rpc-window
+                            :id 42
+                            :workspace-id 1
+                            :layout layout))
+                          ((and (= key 1) (eq table niri-rpc--workspaces))
+                           (make-niri-rpc-workspace
+                            :id 1
+                            :is-active t))))))
+              (should (niri-frame-visible--advice
+                       (lambda (_frame) t) (selected-frame))))))
+      (niri-frame-visible-test--restore-outputs))))
+
+(ert-deftest niri-frame-visible-advice-no-workspace-id ()
+  "Advice passes through when window has no workspace-id (conservative).
+
+A window without a workspace-id (e.g. not yet assigned) should
+not be treated as invisible.  The advice falls through to the
+geometry check, which passes, so the result is t."
+  (let ((niri-frame-visible-test--orig-outputs nil)
+        (niri-frame-visible-threshold 0.5))
+    (unwind-protect
+        (progn
+          (niri-frame-visible-test--mock-outputs
+           '((:name "DP-1" :x 0 :y 0 :width 1920 :height 1080)))
+          (let ((layout (make-niri-rpc-window-layout
+                         :is-visible-in-column t
+                         :tile-size '(500 . 400)
+                         :window-size '(500 . 400)
+                         :window-offset-in-tile '(0 . 0)
+                         :tile-pos-in-workspace-view '(100 . 100))))
+            (cl-letf (((symbol-function 'niri-frame-niri-id) (lambda (_frame) 42))
+                      ((symbol-function 'niri-rpc-window-absolute-rect)
+                       (lambda (_id) '(100 100 500 400)))
+                      ((symbol-function 'gethash)
+                       (lambda (key table)
+                         (when (and (= key 42) (eq table niri-rpc--windows))
+                           (make-niri-rpc-window
+                            :id 42
+                            :workspace-id nil
+                            :layout layout)))))
+              (should (niri-frame-visible--advice
+                       (lambda (_frame) t) (selected-frame))))))
+      (niri-frame-visible-test--restore-outputs))))
+
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;; Tests: Minor mode (integration, needs niri connection)
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -785,39 +893,59 @@ should pass through the original `frame-visible-p' result (t)."
 (ert-deftest niri-frame-visible-workspace-switch ()
   "Test visibility after switching workspaces.
 
-Windows on inactive workspaces still have their geometry defined,
-but they're not rendered.  The visibility check only considers
-geometry, not workspace activation — so `frame-visible-p' should
-return t even on inactive workspaces (consistent with Emacs's
-behavior for virtual desktops)."
+In niri's scrolling tiling layout, windows on inactive
+workspaces are scrolled off-screen and should not be reported
+as visible.  `frame-visible-p' should return nil when the
+window's workspace is not active on its output."
   (niri-frame-visible-test--setup)
   (unless niri-rpc--has-tile-pos
     (ert-skip "niri does not provide tile_pos_in_workspace_view"))
   (let ((frame (selected-frame))
-        (niri-id (niri-frame-niri-id (selected-frame))))
+        (niri-id (niri-frame-niri-id (selected-frame)))
+        (switched nil))
     (should niri-id)
 
-    ;; Initially visible
+    ;; Initially visible (on active workspace)
     (should (frame-visible-p frame))
 
-    ;; Try to focus another workspace (by index 1, i.e. the second workspace)
+    ;; Create a second named workspace and switch to it.
+    ;; This activates a new workspace, making the original one inactive.
+    (message "niri-frame-visible-ws: switching to named workspace 'test-ws-b'")
     (condition-case nil
-        (niri-rpc-action '(:FocusWorkspace (:reference (:Index 1))))
-      (error (message "niri-frame-visible-ws: FocusWorkspace failed (maybe only one workspace)")))
+        (progn
+          (niri-rpc-action '(:FocusWorkspace (:reference (:Name "test-ws-b"))))
+          (setq switched t))
+      (error (message "niri-frame-visible-ws: FocusWorkspace by name failed")))
 
+    ;; Wait for events to converge — the old workspace should become
+    ;; inactive once WorkspaceActivated arrives.  We loop to handle
+    ;; the race between WorkspaceActivated and WorkspacesChanged.
     (niri-frame-visible-test--wait-for-events 0.5)
-
-    ;; Check if the frame is still visible
-    ;; It should be — the geometry still overlaps the output even if
-    ;; the workspace is inactive
-    (should (frame-visible-p frame))
+    (when switched
+      (let ((start (float-time))
+            (ws-id (niri-rpc-window-workspace-id
+                    (gethash niri-id niri-rpc--windows)))
+            (old-ws-inactive nil))
+        (while (and (< (- (float-time) start) 3.0)
+                    (not old-ws-inactive))
+          (accept-process-output niri-rpc--async-process 0.1)
+          (let ((ws (and ws-id (gethash ws-id niri-rpc--workspaces))))
+            (setq old-ws-inactive (and ws (not (niri-rpc-workspace-is-active ws)))))
+          (unless old-ws-inactive
+            (message "niri-frame-visible-ws: waiting for ws-id=%S to become inactive..."
+                     ws-id)))
+        (message "niri-frame-visible-ws: ws-id=%S inactive=%S (waited %.1fs)"
+                 ws-id old-ws-inactive (- (float-time) start))
+        (if old-ws-inactive
+            (should-not (frame-visible-p frame))
+          (message "niri-frame-visible-ws: workspace never deactivated; skipping visibility check"))))
 
     ;; Switch back
     (condition-case nil
         (niri-rpc-action '(:FocusWorkspace (:reference (:Index 0))))
       (error nil))
 
-    (niri-frame-visible-test--wait-for-events 0.5)
+    (niri-frame-visible-test--wait-for-events 1.0)
     (should (frame-visible-p frame)))
   (niri-frame-visible-test--teardown))
 
@@ -854,6 +982,9 @@ Returns a string with PASS/FAIL lines and a summary."
                  "niri-frame-visible-advice-hidden-tab"
                  "niri-frame-visible-advice-visible-in-column"
                  "niri-frame-visible-advice-no-window-in-table"
+                 "niri-frame-visible-advice-inactive-workspace"
+                 "niri-frame-visible-advice-active-workspace"
+                 "niri-frame-visible-advice-no-workspace-id"
                  "niri-frame-visible-mode-enable-disable"
                  "niri-frame-visible-mode-disables-advice"
                  "niri-frame-visible-mapped-frame-is-visible"

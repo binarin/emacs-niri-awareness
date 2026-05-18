@@ -108,6 +108,28 @@ at least one output's logical rect is at least
           nil)))))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+;;; Workspace activity check
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+(defun niri-frame-visible--workspace-active-p (win)
+  "Return non-nil if WIN is on a workspace that is active on its output.
+
+WIN is a `niri-rpc-window' struct.
+
+In niri's scrolling tiling layout, only windows on the active
+workspace of an output are visible; all other workspaces are
+scrolled off-screen.  This function checks whether the window's
+workspace is the active one for its output.
+
+Returns nil (conservatively treating the window as visible) when:
+  - The window has no workspace-id (not yet assigned).
+  - The workspace cannot be found in the workspace map."
+  (let ((ws-id (niri-rpc-window-workspace-id win)))
+    (when ws-id
+      (when-let* ((ws (gethash ws-id niri-rpc--workspaces)))
+        (niri-rpc-workspace-is-active ws)))))
+
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;;; Advice for frame-visible-p
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -128,8 +150,11 @@ Calls the original function, then filters the result:
   - When the original returns non-nil, checks whether FRAME is
     actually visible on any niri output.  First checks if the
     window is visible in its column (i.e. not a hidden tab in a
-    tabbed column).  Then checks if the window geometry is
-    sufficiently visible (per `niri-frame-visible-threshold').
+    tabbed column).  Then checks if the window is on an active
+    workspace (non-active workspaces are scrolled off-screen
+    in niri's scrolling tiling layout).  Finally checks if the
+    window geometry is sufficiently visible (per
+    `niri-frame-visible-threshold').
     If the geometry is unavailable (e.g. older niri without tile
     position info, niri connection lost), the original non-nil
     result is passed through unchanged.
@@ -151,10 +176,17 @@ stale or missing niri connection never breaks Emacs display code
                                  (niri-rpc-window-layout win))))
                       ;; Hidden tab in a tabbed column — not visible.
                       nil
-                    ;; Now check geometry-based visibility.
-                    (if-let* ((rect (niri-rpc-window-absolute-rect niri-id)))
-                        (niri-frame-visible--rect-visible-p rect)
-                      original-result)))
+                    ;; Then check workspace activity: windows on
+                    ;; inactive workspaces are scrolled off-screen
+                    ;; in niri's scrolling tiling layout.
+                    (if (and win
+                             (niri-rpc-window-workspace-id win)
+                             (not (niri-frame-visible--workspace-active-p win)))
+                        nil
+                      ;; Now check geometry-based visibility.
+                      (if-let* ((rect (niri-rpc-window-absolute-rect niri-id)))
+                          (niri-frame-visible--rect-visible-p rect)
+                        original-result))))
               ;; No niri-id — trust the original result.
               original-result)
           (error

@@ -143,6 +143,10 @@ FRAME must be a live frame."
   ;; names survive intact, and computed titles are restored as-is.
   (set-frame-parameter frame 'niri-frame-orig-name
                        (frame-parameter frame 'name))
+  ;; Save whether the name was explicitly set by the user, so we can
+  ;; restore dynamic title computation for non-explicit names.
+  (set-frame-parameter frame 'niri-frame-explicit-name-p
+                       (frame-parameter frame 'explicit-name))
   ;; Compute a base title by reading the current computed title
   (let* ((base-title (or (frame-parameter frame 'title)
                          (with-selected-frame frame
@@ -162,10 +166,18 @@ tag injection).  Also cleans up internal state."
     (when tag
       (remhash tag niri-frame--tag-to-frame)
       (set-frame-parameter frame 'niri-frame-tag nil)))
-  ;; Restore the original effective title (may be a computed title)
-  (let ((orig-name (frame-parameter frame 'niri-frame-orig-name)))
-    (set-frame-parameter frame 'name orig-name)
-    (set-frame-parameter frame 'niri-frame-orig-name nil)))
+  ;; Restore the original effective title.
+  ;; If the name was explicitly set before tag injection, restore it.
+  ;; If it was dynamically computed (from frame-title-format), reset
+  ;; it so it recomputes — otherwise the title freezes at whatever
+  ;; was showing at tag injection time.
+  (let ((orig-name (frame-parameter frame 'niri-frame-orig-name))
+        (was-explicit (frame-parameter frame 'niri-frame-explicit-name-p)))
+    (if was-explicit
+        (set-frame-parameter frame 'name orig-name)
+      (set-frame-parameter frame 'name nil))
+    (set-frame-parameter frame 'niri-frame-orig-name nil)
+    (set-frame-parameter frame 'niri-frame-explicit-name-p nil)))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;;; Frame creation / deletion hooks

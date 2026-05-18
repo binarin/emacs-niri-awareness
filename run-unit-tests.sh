@@ -36,6 +36,7 @@ frame_unit=(
   niri-frame-tag-extraction
   niri-frame-tag-no-match
   niri-frame-tag-nil-title
+  niri-frame-remove-tag-restores-dynamic-title
 )
 
 # Tests from niri-frame-visible-test.el (rect math, advice unit logic):
@@ -58,6 +59,9 @@ visible_unit=(
   niri-frame-visible-advice-hidden-tab
   niri-frame-visible-advice-visible-in-column
   niri-frame-visible-advice-no-window-in-table
+  niri-frame-visible-advice-inactive-workspace
+  niri-frame-visible-advice-active-workspace
+  niri-frame-visible-advice-no-workspace-id
 )
 
 all_tests=("${rpc_unit[@]}" "${frame_unit[@]}" "${visible_unit[@]}")

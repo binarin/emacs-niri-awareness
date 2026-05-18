@@ -179,23 +179,31 @@
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 (ert-deftest niri-frame-remove-tag-restores-computed-title ()
-  "Test that remove-tag restores the saved effective title."
+  "Test that remove-tag resets computed title instead of freezing it.
+
+When the frame name was dynamically computed (not explicitly set),
+remove-tag must not restore a frozen snapshot.  Instead it clears
+the explicit-name so the title keeps recomputing from
+`frame-title-format' on the next redisplay."
   (let ((frame (selected-frame))
         (title-before (frame-parameter (selected-frame) 'name)))
     ;; Clear any saved-name state from prior tests
     (set-frame-parameter frame 'niri-frame-orig-name nil)
     (set-frame-parameter frame 'niri-frame-tag nil)
+    (set-frame-parameter frame 'niri-frame-explicit-name-p nil)
     ;; Inject — saves the current effective title
     (niri-frame--inject-tag frame "[niri-frame-998]")
     ;; The saved original should be the effective title from before
     (should (equal (frame-parameter frame 'niri-frame-orig-name)
                    title-before))
-    ;; Remove — restores the saved title
+    ;; Remove — resets name so it's not frozen
     (niri-frame--remove-tag frame)
-    (should (equal (frame-parameter frame 'name) title-before))
+    ;; explicit-name must be nil (allowing dynamic recomputation)
+    (should-not (frame-parameter frame 'explicit-name))
     ;; Cleanup params cleared
     (should-not (frame-parameter frame 'niri-frame-orig-name))
-    (should-not (frame-parameter frame 'niri-frame-tag))))
+    (should-not (frame-parameter frame 'niri-frame-tag))
+    (should-not (frame-parameter frame 'niri-frame-explicit-name-p))))
 
 (ert-deftest niri-frame-remove-tag-restores-custom-name ()
   "Test that remove-tag restores an explicitly set custom name."
@@ -211,6 +219,54 @@
     (should (equal (frame-parameter frame 'name) custom))
     (should-not (frame-parameter frame 'niri-frame-orig-name))
     (should-not (frame-parameter frame 'niri-frame-tag))))
+
+(ert-deftest niri-frame-remove-tag-restores-dynamic-title ()
+  "Test that remove-tag does not freeze a dynamically computed title.
+
+When the frame's name was computed dynamically from
+`frame-title-format' (not explicitly set by the user),
+remove-tag must clear explicit-name so the title keeps
+recomputing — otherwise it freezes at the injection-time value.
+
+Note: PGTK maps a nil frame name to \"Emacs\", so we
+can't assert that name is nil.  Instead we verify
+explicit-name is cleared and the frozen orig-name is not kept."
+  (let ((frame (selected-frame)))
+    ;; Clear prior state
+    (set-frame-parameter frame 'niri-frame-orig-name nil)
+    (set-frame-parameter frame 'niri-frame-tag nil)
+    (set-frame-parameter frame 'niri-frame-explicit-name-p nil)
+    ;; Set up state simulating injection where explicit-name was nil
+    (set-frame-parameter frame 'niri-frame-orig-name "some-dynamic-title")
+    (set-frame-parameter frame 'niri-frame-tag "[niri-frame-999]")
+    (set-frame-parameter frame 'niri-frame-explicit-name-p nil)
+    (puthash "[niri-frame-999]" frame niri-frame--tag-to-frame)
+    ;; Now call remove-tag — name should NOT be frozen to orig-name
+    (niri-frame--remove-tag frame)
+    ;; explicit-name cleared (dynamic title recomputation)
+    (should-not (frame-parameter frame 'explicit-name))
+    ;; Cleanup params cleared
+    (should-not (frame-parameter frame 'niri-frame-orig-name))
+    (should-not (frame-parameter frame 'niri-frame-tag))
+    (should-not (frame-parameter frame 'niri-frame-explicit-name-p))
+    (should-not (gethash "[niri-frame-999]" niri-frame--tag-to-frame)))
+  ;; Also verify via full inject→remove cycle
+  (let ((frame (selected-frame)))
+    (set-frame-parameter frame 'niri-frame-orig-name nil)
+    (set-frame-parameter frame 'niri-frame-tag nil)
+    (set-frame-parameter frame 'niri-frame-explicit-name-p nil)
+    ;; Ensure name is NOT explicit before injection
+    (set-frame-parameter frame 'explicit-name nil)
+    (set-frame-parameter frame 'name nil)
+    (let ((title-before (frame-parameter frame 'name)))
+      (niri-frame--inject-tag frame "[niri-frame-996]")
+      ;; explicit-name-p saved as nil
+      (should-not (frame-parameter frame 'niri-frame-explicit-name-p))
+      (niri-frame--remove-tag frame)
+      ;; Name must not be the stale frozen title
+      ;; (PGTK remaps nil name to "Emacs", but explicit-name is cleared)
+      (should-not (frame-parameter frame 'explicit-name))
+      (should-not (frame-parameter frame 'niri-frame-explicit-name-p)))))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;; Tests: Tag generation and parsing (unit tests, no connection needed)
@@ -313,6 +369,7 @@ parsing by a shell script."
                  "niri-frame-delete-clears-mappings"
                  "niri-frame-remove-tag-restores-computed-title"
                  "niri-frame-remove-tag-restores-custom-name"
+                 "niri-frame-remove-tag-restores-dynamic-title"
                  "niri-frame-bidirectional-consistency"
                  "niri-frame-get-frame-missing"
                  "niri-frame-niri-id-missing"))
