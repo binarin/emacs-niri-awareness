@@ -21,11 +21,14 @@
                 (= (hash-table-count niri-rpc--windows) 0))
       (accept-process-output niri-rpc--async-process 0.1)))
   (niri-frame-enable)
-  ;; Wait for existing frames to be tagged and matched via async events
+  ;; Brief flush to let GDK/Wayland update propagate
+  (sit-for 0.1)
+  ;; Wait for pending frames to become mapped (niri emits
+  ;; WindowOpenedOrChanged when it sees our title changes)
   (let ((start (float-time)))
-    (while (and (< (- (float-time) start) 2.0)
-                (> (hash-table-count niri-frame--tag-to-frame) 0))
-      (accept-process-output niri-rpc--async-process 0.05))))
+    (while (and (< (- (float-time) start) 3.0)
+                (niri-frame-pending-frames))
+      (accept-process-output niri-rpc--async-process 0.1))))
 
 (defun niri-frame-test--teardown ()
   "Disable frame tracking and disconnect from niri."
@@ -33,11 +36,13 @@
   (ignore-errors (niri-rpc-disconnect)))
 
 (defun niri-frame-test--wait-for-mapping (timeout)
-  "Wait up to TIMEOUT seconds for pending tags to be matched."
+  "Wait up to TIMEOUT seconds for all pending frames to be mapped."
   (let ((start (float-time)))
+    ;; Give the Wayland connection a chance to flush by sitting briefly
+    (sit-for 0.05)
     (while (and (< (- (float-time) start) timeout)
-                (> (hash-table-count niri-frame--tag-to-frame) 0))
-      (accept-process-output niri-rpc--async-process 0.05))))
+                (niri-frame-pending-frames))
+      (accept-process-output niri-rpc--async-process 0.1))))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;; Tests: Enable / disable
@@ -47,7 +52,7 @@
   "Test that frame tracking can be enabled and disabled cleanly."
   (niri-frame-test--setup)
   (should niri-frame--enabled)
-  (should (= (hash-table-count niri-frame--tag-to-frame) 0))
+  (should (= (length (niri-frame-pending-frames)) 0))
   (niri-frame-test--teardown)
   (should-not niri-frame--enabled)
   (should-not (memq #'niri-frame--on-frame-created after-make-frame-functions))
@@ -95,41 +100,40 @@
     (should-not pending))
   (niri-frame-test--teardown))
 
-(ert-deftest niri-frame-title-no-tag-after-mapping ()
-  "Test that the frame title does not contain the tag after mapping."
+(ert-deftest niri-frame-title-has-zws-encoding ()
+  "Test that the frame title contains zero-width encoding after enable."
   (niri-frame-test--setup)
   (let ((title (frame-parameter (selected-frame) 'name)))
-    ;; The title should not contain our tag
-    (should-not (niri-frame--title-has-tag-p (or title ""))))
-  (let ((tag-param (frame-parameter (selected-frame) 'niri-frame-tag)))
-    (should-not tag-param))
+    (should title)
+    ;; The title should end with zero-width characters encoding our frame-id
+    (let ((id (niri-frame--frame-id-decode title)))
+      (should id)
+      (should (= id (frame-id (selected-frame))))))
   (niri-frame-test--teardown))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;; Tests: Frame creation
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-(ert-deftest niri-frame-new-frame-tagged-and-mapped ()
-  "Test that a newly created frame is tagged and eventually mapped."
+(ert-deftest niri-frame-new-frame-mapped ()
+  "Test that a newly created frame gets mapped to its niri window."
   (niri-frame-test--setup)
+  (sit-for 0.1)  ; let Wayland messages from enable propagate
   (let* ((count-before (length (niri-frame-frames)))
          (new-frame (make-frame '((name . "niri-frame-test-temp")))))
     (unwind-protect
         (progn
-          ;; The new frame should have a tag parameter immediately
-          (should (frame-parameter new-frame 'niri-frame-tag))
-          (should (string-match-p niri-frame-tag-regexp-pattern
-                                  (or (frame-parameter new-frame 'niri-frame-tag) "")))
           ;; Wait for niri to emit WindowOpenedOrChanged and our hook to match
           (niri-frame-test--wait-for-mapping 2.0)
           ;; After mapping, the frame should be in the mappings
           (let ((niri-id (niri-frame-niri-id new-frame)))
             (should niri-id)
             (should (integerp niri-id))
-            ;; Tag should be removed
-            (should-not (frame-parameter new-frame 'niri-frame-tag))
-            ;; And the reverse lookup works
-            (should (eq (niri-frame-get-frame niri-id) new-frame)))
+            ;; The reverse lookup works
+            (should (eq (niri-frame-get-frame niri-id) new-frame))
+            ;; Title should contain zero-width encoding
+            (let ((title (frame-parameter new-frame 'name)))
+              (should (niri-frame--frame-id-decode title))))
           ;; Total mapped frames should have increased
           (should (= (length (niri-frame-frames)) (1+ count-before))))
       (delete-frame new-frame)))
@@ -138,12 +142,16 @@
 (ert-deftest niri-frame-new-frame-pending-then-mapped ()
   "Test the pending → mapped lifecycle of a new frame."
   (niri-frame-test--setup)
+  (sit-for 0.1)
   (let ((new-frame (make-frame '((name . "niri-frame-test-lifecycle")))))
     (unwind-protect
         (progn
           ;; Immediately after creation, it should be pending
           (let ((pending (niri-frame-pending-frames)))
             (should (memq new-frame pending)))
+          ;; The title should already have zero-width encoding
+          (let ((title (frame-parameter new-frame 'name)))
+            (should (niri-frame--frame-id-decode title)))
           ;; After waiting, it should no longer be pending
           (niri-frame-test--wait-for-mapping 2.0)
           (should-not (memq new-frame (niri-frame-pending-frames)))
@@ -159,6 +167,7 @@
 (ert-deftest niri-frame-delete-clears-mappings ()
   "Test that deleting a frame removes its niri window mappings."
   (niri-frame-test--setup)
+  (sit-for 0.1)
   (let ((new-frame (make-frame '((name . "niri-frame-test-delete"))))
         niri-id)
     ;; Wait for mapping
@@ -175,139 +184,89 @@
   (niri-frame-test--teardown))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-;; Tests: Custom name preservation
+;; Tests: Explicit name handling
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-(ert-deftest niri-frame-remove-tag-restores-computed-title ()
-  "Test that remove-tag resets computed title instead of freezing it.
+(ert-deftest niri-frame-explicit-name-has-encoding ()
+  "Test that frames with explicit names get zero-width encoding.
 
-When the frame name was dynamically computed (not explicitly set),
-remove-tag must not restore a frozen snapshot.  Instead it clears
-the explicit-name so the title keeps recomputing from
-`frame-title-format' on the next redisplay."
-  (let ((frame (selected-frame))
-        (title-before (frame-parameter (selected-frame) 'name)))
-    ;; Clear any saved-name state from prior tests
-    (set-frame-parameter frame 'niri-frame-orig-name nil)
-    (set-frame-parameter frame 'niri-frame-tag nil)
-    (set-frame-parameter frame 'niri-frame-explicit-name-p nil)
-    ;; Inject — saves the current effective title
-    (niri-frame--inject-tag frame "[niri-frame-998]")
-    ;; The saved original should be the effective title from before
-    (should (equal (frame-parameter frame 'niri-frame-orig-name)
-                   title-before))
-    ;; Remove — resets name so it's not frozen
-    (niri-frame--remove-tag frame)
-    ;; explicit-name must be nil (allowing dynamic recomputation)
-    (should-not (frame-parameter frame 'explicit-name))
-    ;; Cleanup params cleared
-    (should-not (frame-parameter frame 'niri-frame-orig-name))
-    (should-not (frame-parameter frame 'niri-frame-tag))
-    (should-not (frame-parameter frame 'niri-frame-explicit-name-p))))
-
-(ert-deftest niri-frame-remove-tag-restores-custom-name ()
-  "Test that remove-tag restores an explicitly set custom name."
-  (let ((frame (selected-frame))
-        (custom "My Custom Emacs Title"))
-    (set-frame-parameter frame 'niri-frame-orig-name nil)
-    (set-frame-parameter frame 'niri-frame-tag nil)
+When a frame's name is set explicitly (bypassing frame-title-format),
+the modify-frame-parameters advice appends the encoding to the
+title parameter."
+  (niri-frame-test--setup)
+  (sit-for 0.1)
+  (let* ((frame (selected-frame))
+         (custom "My Custom Emacs Title"))
     (set-frame-parameter frame 'name custom)
-    (niri-frame--inject-tag frame "[niri-frame-997]")
-    (should (equal (frame-parameter frame 'niri-frame-orig-name)
-                   custom))
-    (niri-frame--remove-tag frame)
-    (should (equal (frame-parameter frame 'name) custom))
-    (should-not (frame-parameter frame 'niri-frame-orig-name))
-    (should-not (frame-parameter frame 'niri-frame-tag))))
+    (let ((title (frame-parameter frame 'name)))
+      (should title)
+      (let ((id (niri-frame--frame-id-decode title)))
+        (should id)
+        (should (= id (frame-id frame))))))
+  (niri-frame-test--teardown))
 
-(ert-deftest niri-frame-remove-tag-restores-dynamic-title ()
-  "Test that remove-tag does not freeze a dynamically computed title.
+(ert-deftest niri-frame-explicit-name-clear-removes-encoding-via-title ()
+  "Test that clearing an explicit name lets frame-title-format take over.
 
-When the frame's name was computed dynamically from
-`frame-title-format' (not explicitly set by the user),
-remove-tag must clear explicit-name so the title keeps
-recomputing — otherwise it freezes at the injection-time value.
-
-Note: PGTK maps a nil frame name to \"Emacs\", so we
-can't assert that name is nil.  Instead we verify
-explicit-name is cleared and the frozen orig-name is not kept."
+When name is cleared, title is also cleared so the encoding comes
+from frame-title-format again."
+  (niri-frame-test--setup)
+  (sit-for 0.1)
   (let ((frame (selected-frame)))
-    ;; Clear prior state
-    (set-frame-parameter frame 'niri-frame-orig-name nil)
-    (set-frame-parameter frame 'niri-frame-tag nil)
-    (set-frame-parameter frame 'niri-frame-explicit-name-p nil)
-    ;; Set up state simulating injection where explicit-name was nil
-    (set-frame-parameter frame 'niri-frame-orig-name "some-dynamic-title")
-    (set-frame-parameter frame 'niri-frame-tag "[niri-frame-999]")
-    (set-frame-parameter frame 'niri-frame-explicit-name-p nil)
-    (puthash "[niri-frame-999]" frame niri-frame--tag-to-frame)
-    ;; Now call remove-tag — name should NOT be frozen to orig-name
-    (niri-frame--remove-tag frame)
-    ;; explicit-name cleared (dynamic title recomputation)
-    (should-not (frame-parameter frame 'explicit-name))
-    ;; Cleanup params cleared
-    (should-not (frame-parameter frame 'niri-frame-orig-name))
-    (should-not (frame-parameter frame 'niri-frame-tag))
-    (should-not (frame-parameter frame 'niri-frame-explicit-name-p))
-    (should-not (gethash "[niri-frame-999]" niri-frame--tag-to-frame)))
-  ;; Also verify via full inject→remove cycle
-  (let ((frame (selected-frame)))
-    (set-frame-parameter frame 'niri-frame-orig-name nil)
-    (set-frame-parameter frame 'niri-frame-tag nil)
-    (set-frame-parameter frame 'niri-frame-explicit-name-p nil)
-    ;; Ensure name is NOT explicit before injection
-    (set-frame-parameter frame 'explicit-name nil)
+    (set-frame-parameter frame 'name "temp")
+    (let ((title-with-name (frame-parameter frame 'name)))
+      (should (niri-frame--frame-id-decode title-with-name)))
+    ;; Clear name
     (set-frame-parameter frame 'name nil)
-    (let ((title-before (frame-parameter frame 'name)))
-      (niri-frame--inject-tag frame "[niri-frame-996]")
-      ;; explicit-name-p saved as nil
-      (should-not (frame-parameter frame 'niri-frame-explicit-name-p))
-      (niri-frame--remove-tag frame)
-      ;; Name must not be the stale frozen title
-      ;; (PGTK remaps nil name to "Emacs", but explicit-name is cleared)
-      (should-not (frame-parameter frame 'explicit-name))
-      (should-not (frame-parameter frame 'niri-frame-explicit-name-p)))))
+    (let ((title-after (frame-parameter frame 'name)))
+      ;; After clearing name, frame-title-format provides the title
+      ;; (which includes the encoding suffix)
+      (should title-after)
+      (should (niri-frame--frame-id-decode title-after))))
+  (niri-frame-test--teardown))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-;; Tests: Tag generation and parsing (unit tests, no connection needed)
+;; Tests: Zero-width encoding and decoding (unit tests, no connection needed)
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-(ert-deftest niri-frame-tag-format ()
-  "Test that tags are generated with the expected format."
-  (let ((niri-frame--counter 0)
-        (tag1 (niri-frame--make-tag (niri-frame--next-counter)))
-        (tag2 (niri-frame--make-tag (niri-frame--next-counter))))
-    (should (string-match-p niri-frame-tag-regexp-pattern tag1))
-    (should (string-match-p niri-frame-tag-regexp-pattern tag2))
-    ;; Tags should be different (monotonic counter)
-    (should-not (string= tag1 tag2))
-    ;; Tags should start with the configured prefix
-    (should (string-prefix-p niri-frame-tag-prefix tag1))
-    (should (string-prefix-p niri-frame-tag-prefix tag2))))
+(ert-deftest niri-frame-zws-encode-format ()
+  "Test that frame-id encoding produces only zero-width chars."
+  (let ((encoded (niri-frame--frame-id-encode 42)))
+    (should (stringp encoded))
+    (should (> (length encoded) 0))
+    ;; All characters should be ZWNJ or ZWJ
+    (dolist (c (append encoded nil))
+      (should (or (eq c #x200C) (eq c #x200D))))))
 
-(ert-deftest niri-frame-tag-extraction ()
-  "Test extracting tags from window titles."
-  (let ((tagged-title "*scratch* - GNU Emacs [niri-frame-42]"))
-    (should (niri-frame--title-has-tag-p tagged-title))
-    (should (equal (niri-frame--extract-tag tagged-title)
-                   "[niri-frame-42]"))
-    (should (= (niri-frame--extract-counter tagged-title) 42))))
+(ert-deftest niri-frame-zws-encode-decode-roundtrip ()
+  "Test that encode then decode returns the original frame-id."
+  (dolist (id '(0 1 2 5 42 256 1337 99999))
+    (let* ((encoded (niri-frame--frame-id-encode id))
+           (title (concat "Some Buffer — Emacs" encoded)))
+      (should (= (niri-frame--frame-id-decode title) id)))))
 
-(ert-deftest niri-frame-tag-no-match ()
-  "Test that titles without tags are correctly identified."
-  (let ((plain-title "*scratch* - GNU Emacs at furfur")
-        (weird-title "[just-brackets]"))
-    (should-not (niri-frame--title-has-tag-p plain-title))
-    (should-not (niri-frame--extract-tag plain-title))
-    (should-not (niri-frame--extract-counter plain-title))
-    (should-not (niri-frame--title-has-tag-p weird-title))
-    (should-not (niri-frame--extract-tag weird-title))))
+(ert-deftest niri-frame-zws-encode-zero ()
+  "Test encoding and decoding of frame-id 0."
+  (let ((encoded (niri-frame--frame-id-encode 0)))
+    (should (> (length encoded) 0))
+    (should (= (niri-frame--frame-id-decode encoded) 0))))
 
-(ert-deftest niri-frame-tag-nil-title ()
+(ert-deftest niri-frame-zws-decode-no-encoding ()
+  "Test that titles without zero-width encoding return nil."
+  (should-not (niri-frame--frame-id-decode "plain title"))
+  (should-not (niri-frame--frame-id-decode "buffer.txt — Emacs"))
+  (should-not (niri-frame--frame-id-decode "")))
+
+(ert-deftest niri-frame-zws-decode-nil-title ()
   "Test that nil titles are handled safely."
-  (should-not (niri-frame--title-has-tag-p nil))
-  (should-not (niri-frame--extract-tag nil))
-  (should-not (niri-frame--extract-counter nil)))
+  (should-not (niri-frame--frame-id-decode nil)))
+
+(ert-deftest niri-frame-zws-id-suffix-uses-selected-frame ()
+  "Test that niri-frame--id-suffix encodes the correct frame-id."
+  (with-selected-frame (selected-frame)
+    (let ((suffix (niri-frame--id-suffix))
+          (expected (niri-frame--frame-id-encode (frame-id))))
+      (should (string= suffix expected)))))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;; Tests: Bidirectional lookup consistency
@@ -344,7 +303,7 @@ explicit-name is cleared and the frozen orig-name is not kept."
 
 ;;;###autoload
 (defun niri-frame-test-run-all (&optional results-dir)
-  "Run all niri-frame tests sequentially.
+  "Run all nifi-frame tests sequentially.
 
 If RESULTS-DIR is non-nil, write per-test result files:
   RESULTS-DIR/<test-name>/result    — `PASS' or `FAIL ...'
@@ -354,22 +313,23 @@ If RESULTS-DIR is non-nil, write per-test result files:
 Returns a string with PASS/FAIL lines and a summary, suitable for
 parsing by a shell script."
   (interactive)
-  (let ((tests '("niri-frame-tag-format"
-                 "niri-frame-tag-extraction"
-                 "niri-frame-tag-no-match"
-                 "niri-frame-tag-nil-title"
+  (let ((tests '("niri-frame-zws-encode-format"
+                 "niri-frame-zws-encode-decode-roundtrip"
+                 "niri-frame-zws-encode-zero"
+                 "niri-frame-zws-decode-no-encoding"
+                 "niri-frame-zws-decode-nil-title"
+                 "niri-frame-zws-id-suffix-uses-selected-frame"
                  "niri-frame-enable-disable"
                  "niri-frame-enable-requires-connection"
                  "niri-frame-existing-frame-mapped"
                  "niri-frame-frames-alist"
                  "niri-frame-no-pending-after-mapping"
-                 "niri-frame-title-no-tag-after-mapping"
-                 "niri-frame-new-frame-tagged-and-mapped"
+                 "niri-frame-title-has-zws-encoding"
+                 "niri-frame-new-frame-mapped"
                  "niri-frame-new-frame-pending-then-mapped"
                  "niri-frame-delete-clears-mappings"
-                 "niri-frame-remove-tag-restores-computed-title"
-                 "niri-frame-remove-tag-restores-custom-name"
-                 "niri-frame-remove-tag-restores-dynamic-title"
+                 "niri-frame-explicit-name-has-encoding"
+                 "niri-frame-explicit-name-clear-removes-encoding-via-title"
                  "niri-frame-bidirectional-consistency"
                  "niri-frame-get-frame-missing"
                  "niri-frame-niri-id-missing"))
@@ -378,8 +338,33 @@ parsing by a shell script."
         (skipped 0)
         (output nil))
     (dolist (test-name tests)
-      ;; Clean slate before each test: disconnect, drain pending events,
-      ;; and clear *Messages* so we can check for process-filter errors.
+      ;; Clean slate before each test: disable frame tracking,
+      ;; delete extra frames from previous tests, disconnect niri-rpc,
+      ;; drain pending events, and clear message buffers.
+      (ignore-errors (niri-frame-disable))
+      ;; Delete all extra frames except one (keep the initial frame)
+      (let ((frames (frame-list)))
+        (when (> (length frames) 1)
+          (dolist (f (cdr frames))
+            (ignore-errors (delete-frame f)))))
+      ;; Reset the remaining frame to clean state
+      (let ((f (car (frame-list))))
+        (ignore-errors (set-frame-parameter f 'name nil))
+        (ignore-errors (set-frame-parameter f 'title nil)))
+      ;; Reset frame-title-format to remove stale encoding suffix,
+      ;; so the next test's enable adds a clean suffix.
+      (when (niri-frame--title-format-has-suffix-p)
+        (let ((fmt frame-title-format))
+          (setq frame-title-format
+                (if (listp fmt)
+                    (cl-remove-if (lambda (elt)
+                                    (equal elt '(:eval (niri-frame--id-suffix))))
+                                  fmt)
+                  fmt)))
+        ;; If reduced to a single-element list, unwrap it
+        (when (and (listp frame-title-format)
+                   (= (length frame-title-format) 1))
+          (setq frame-title-format (car frame-title-format))))
       (ignore-errors (niri-rpc-disconnect))
       (when niri-rpc--async-process
         (while (accept-process-output niri-rpc--async-process 0.01)))

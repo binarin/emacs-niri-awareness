@@ -22,7 +22,7 @@ The script:
 1. Starts niri in embedded (nested) mode with a generated config
 2. Niri auto-starts an Emacs daemon
 3. Waits for Emacs to be ready (default 15s timeout)
-4. Runs all 46 tests (18 frame + 28 visible) via emacsclient
+4. Runs all 48 tests (20 frame + 28 visible) via emacsclient
    (or a single test when `--test NAME` is given)
 5. Refuses to start if an emacs from a previous --keep-running is
    detected at the target socket.  Use --reuse-running to skip niri
@@ -91,7 +91,7 @@ emacsclient -s pi --eval "
 
 ```elisp
 ;; Unit tests only (no niri connection needed)
-(ert-run-tests-batch-and-exit "niri-frame-tag-")
+(ert-run-tests-batch-and-exit "niri-frame-zws-")
 
 ;; Single integration test (needs niri connection)
 (progn
@@ -144,8 +144,8 @@ Each integration test runs `niri-frame-test--setup()` which:
 1. Calls `(niri-rpc-connect)` — opens a Unix socket to niri (uses
    `NIRI_SOCKET` env var; niri sets this for spawned processes)
 2. Waits for event stream to populate the windows hash table
-3. Calls `(niri-frame-enable)` — adds hooks so new frames get tagged
-4. Waits for existing frames to be matched and tags removed
+3. Calls `(niri-frame-enable)` — adds hooks and zero-width frame-id encoding
+4. Waits for existing frames to be matched (niri emits WindowOpenedOrChanged)
 
 `niri-frame-test--teardown()` calls `(niri-frame-disable)` then
 `(niri-rpc-disconnect)`.
@@ -160,14 +160,16 @@ emacsclient -s niri-frame-test --eval "
 (progn
   (load-file \"/path/to/niri-frame.el\")
   (load-file \"/path/to/niri-frame-test.el\")
-  (ert \"niri-frame-tag-format\"))"
+  (ert \"niri-frame-zws-encode-format\"))"
 ```
 
-Unit tests (4 total):
-- `niri-frame-tag-format` — tag generation format
-- `niri-frame-tag-extraction` — extracting tags from titles
-- `niri-frame-tag-no-match` — titles without tags
-- `niri-frame-tag-nil-title` — nil title safety
+Unit tests (6 total):
+- `niri-frame-zws-encode-format` — encoding format
+- `niri-frame-zws-encode-decode-roundtrip` — encode/decode roundtrip
+- `niri-frame-zws-encode-zero` — encoding/decoding of frame-id 0
+- `niri-frame-zws-decode-no-encoding` — titles without encoding
+- `niri-frame-zws-decode-nil-title` — nil title safety
+- `niri-frame-zws-id-suffix-uses-selected-frame` — suffix uses selected frame
 
 **Integration tests** (require niri connection):
 
@@ -189,12 +191,12 @@ Integration tests (14 total):
 - `niri-frame-existing-frame-mapped` — existing frame gets niri window id
 - `niri-frame-frames-alist` — niri-frame-frames returns valid mappings
 - `niri-frame-no-pending-after-mapping` — no pending after mapping completes
-- `niri-frame-title-no-tag-after-mapping` — tag removed from title after mapping
-- `niri-frame-new-frame-tagged-and-mapped` — new frame tagged then mapped
+- `niri-frame-title-has-zws-encoding` — title has zero-width encoding after enable
+- `niri-frame-new-frame-mapped` — new frame gets mapped to niri window
 - `niri-frame-new-frame-pending-then-mapped` — pending → mapped lifecycle
 - `niri-frame-delete-clears-mappings` — deletion cleans up mappings
-- `niri-frame-remove-tag-restores-computed-title` — tag removal restores title
-- `niri-frame-remove-tag-restores-custom-name` — tag removal restores custom name
+- `niri-frame-explicit-name-has-encoding` — explicit-name frames get encoding
+- `niri-frame-explicit-name-clear-removes-encoding-via-title` — clearing name restores frame-title-format
 - `niri-frame-bidirectional-consistency` — forward/reverse lookup consistency
 - `niri-frame-get-frame-missing` — nil on unknown window id
 - `niri-frame-niri-id-missing` — nil on unmapped frame
@@ -210,7 +212,7 @@ emacsclient -s niri-frame-test --eval "
   (niri-frame-test-run-all \"/path/to/results\"))"
 ```
 
-`niri-frame-test-run-all` runs all 18 tests sequentially. For each test it:
+`niri-frame-test-run-all` runs all 20 tests sequentially. For each test it:
 1. Disconnects any prior niri connection and kills `*Messages*`/`*Warnings*`
 2. Runs the ert test
 3. Writes per-test result files (`result`, `messages`, `warnings`)
@@ -241,13 +243,13 @@ niri-rpc--connected
 (niri-frame-frames)
 ;; => ((<frame> . <id>) ...)
 
-;; List pending (tagged but not yet matched) frames
+;; List frames not yet mapped to niri windows
 (niri-frame-pending-frames)
 ;; => (<frame> ...)
 
 ;; Create a new frame and watch the lifecycle
 (make-frame '((name . "test-frame")))
-(niri-frame-pending-frames)   ; should show the new frame
+(niri-frame-pending-frames)   ; should show the new frame (not yet mapped)
 ;; Wait for niri events to propagate:
 (accept-process-output niri-rpc--async-process 1.0)
 (niri-frame-niri-id <new-frame>)  ; should have an id now

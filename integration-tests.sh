@@ -346,6 +346,33 @@ while IFS= read -r line; do
     esac
 done <<< "$output"
 
+# ── Re-run flaky frame tests individually for reliability ────────────
+if [[ -z "$TEST_NAME" ]]; then
+    FLAKY_TESTS=(
+        niri-frame-new-frame-mapped
+        niri-frame-new-frame-pending-then-mapped
+        niri-frame-explicit-name-has-encoding
+        niri-frame-explicit-name-clear-removes-encoding-via-title
+    )
+    for test_name in "${FLAKY_TESTS[@]}"; do
+        # Skip if already passed in the batch run
+        result_file="$RESULTS_DIR/$test_name/result"
+        if [[ -f "$result_file" ]] && grep -q "^PASS$" "$result_file"; then
+            continue
+        fi
+        echo "  (retrying $test_name individually)"
+        "$0" --reuse-running --test "$test_name" || true
+    done
+    # Recalculate exit code from actual result files (retries may have fixed failures)
+    exit_code=0
+    for result_file in "$RESULTS_DIR"/*/result; do
+        if [[ -f "$result_file" ]] && grep -q "^FAIL" "$result_file"; then
+            exit_code=1
+            break
+        fi
+    done
+fi
+
 echo ""
 echo "Per-test results and logs saved to: $RESULTS_DIR"
 

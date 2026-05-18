@@ -16,11 +16,27 @@
 ;; The problem: niri reports windows by PID and title.  When multiple
 ;; Emacs frames share the same title, we cannot disambiguate them.
 ;;
-;; The solution: when a new frame is created, we inject a unique tag
-;; into its Wayland window title via the frame's `name' parameter.
-;; When the corresponding niri WindowOpenedOrChanged event arrives,
-;; we extract the tag, establish the mapping, and remove the tag
-;; from the title.
+;; The solution: each Emacs frame's Wayland window title permanently
+;; ends with an invisible binary encoding of its `frame-id', using
+;; zero-width characters:
+;;
+;;   ZWNJ (U+200C) = binary 0
+;;   ZWJ  (U+200D) = binary 1
+;;
+;; These characters are invisible in all rendering contexts, so the
+;; title looks normal to users.  Niri receives the full title and
+;; reports it in window events; we decode the frame-id to reliably
+;; identify which niri window belongs to which Emacs frame.
+;;
+;; Two cases for title management:
+;;
+;; 1. Frames WITHOUT an explicit name: the encoding is appended via
+;;    `(:eval (niri-frame--id-suffix))' in `frame-title-format'.
+;;
+;; 2. Frames WITH an explicit name (set via `modify-frame-parameters'):
+;;    advice intercepts the name change and also sets the `title'
+;;    parameter with the encoding appended.  When the name is cleared,
+;;    `title' is cleared so `frame-title-format' takes over again.
 ;;
 ;; Usage:
 ;;
@@ -51,23 +67,53 @@
   "Map niri windows to Emacs frames."
   :group 'niri-rpc)
 
-(defcustom niri-frame-tag-prefix "[niri-frame-"
-  "Prefix string for injecting into frame titles.
-The full tag is this prefix followed by a monotonically
-increasing counter and a closing bracket."
-  :type 'string
-  :group 'niri-frame)
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+;;; Zero-width encoding
+;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-(defcustom niri-frame-tag-suffix "]"
-  "Suffix string closing a frame tag."
-  :type 'string
-  :group 'niri-frame)
+(defconst niri-frame--zw-0 (string #x200C)
+  "Zero Width Non-Joiner, represents binary 0 in frame-id encoding.")
 
-(defcustom niri-frame-tag-regexp-pattern "\\[niri-frame-\\([0-9]+\\)\\]"
-  "Regexp pattern matching a frame tag in a window title.
-Group 1 must capture the counter value."
-  :type 'regexp
-  :group 'niri-frame)
+(defconst niri-frame--zw-1 (string #x200D)
+  "Zero Width Joiner, represents binary 1 in frame-id encoding.")
+
+(defun niri-frame--frame-id-encode (frame-id)
+  "Encode FRAME-ID as a string of zero-width characters.
+Binary digits: 0 -> ZWNJ, 1 -> ZWJ, most significant bit first."
+  (let ((num frame-id)
+        (bits nil))
+    (if (zerop num)
+        (setq bits (list ?0))
+      (while (> num 0)
+        (push (if (zerop (logand num 1)) ?0 ?1) bits)
+        (setq num (ash num -1))))
+    (apply #'concat
+           (mapcar (lambda (c)
+                     (if (eq c ?1) niri-frame--zw-1 niri-frame--zw-0))
+                   bits))))
+
+(defun niri-frame--frame-id-decode (title)
+  "Extract frame-id from TITLE encoded with zero-width characters.
+Scans backwards from the end of TITLE, collecting ZWJ/ZWNJ chars
+until a non-zero-width character is hit.  Returns the decoded
+integer, or nil if no encoding found."
+  (when title
+    (let ((bits nil)
+          (chars (append title nil)))
+      (catch 'done
+        (dolist (c (reverse chars))
+          (cond ((eq c #x200C) (push ?0 bits))
+                ((eq c #x200D) (push ?1 bits))
+                (t (throw 'done t)))))
+      (when bits
+        (string-to-number (concat bits) 2)))))
+
+(defun niri-frame--id-suffix ()
+  "Return the zero-width encoded frame-id suffix for the selected frame.
+Intended for use with (:eval ...) in `frame-title-format'.
+During redisplay, `gui_consider_frame_title' selects the target frame
+before evaluating the format, so `frame-id' returns the correct value."
+  (niri-frame--frame-id-encode (frame-id)))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;;; Internal state
@@ -76,108 +122,92 @@ Group 1 must capture the counter value."
 (defvar niri-frame--enabled nil
   "Non-nil when frame tracking is active.")
 
-(defvar niri-frame--counter 0
-  "Monotonically increasing counter for frame tag generation.")
-
-(defvar niri-frame--tag-to-frame (make-hash-table :test 'equal)
-  "Hash table mapping tag string -> Emacs frame.
-Used during the brief window between injecting a tag into a
-frame's title and the corresponding niri event arriving.")
-
-(defvar niri-frame--frame-to-niri-id (make-hash-table :test 'eq)
+(defvar niri-frame--frame-to-niri-id (make-hash-table :test #'eq)
   "Hash table mapping Emacs frame -> niri window id.
 This is the primary mapping used by `niri-frame-niri-id'.")
 
-(defvar niri-frame--niri-id-to-frame (make-hash-table :test 'eql)
+(defvar niri-frame--niri-id-to-frame (make-hash-table :test #'eql)
   "Hash table mapping niri window id -> Emacs frame.
 This is the reverse mapping used by `niri-frame-get-frame'.")
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-;;; Tag management
+;;; frame-title-format management
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-(defun niri-frame--next-counter ()
-  "Return the next counter value for a frame tag."
-  (cl-incf niri-frame--counter))
+(defun niri-frame--strip-encoding (title)
+  "Remove any zero-width encoding suffix from TITLE.
+Scans backwards and strips all ZWJ/ZWNJ characters from the end."
+  (if title
+      (let* ((chars (append title nil))
+             (len (length chars)))
+        (while (and (> len 0)
+                    (or (eq (nth (1- len) chars) #x200C)
+                        (eq (nth (1- len) chars) #x200D)))
+          (setq len (1- len)))
+        (substring title 0 len))
+    title))
 
-(defun niri-frame--make-tag (counter)
-  "Create a tag string for COUNTER."
-  (concat niri-frame-tag-prefix
-          (number-to-string counter)
-          niri-frame-tag-suffix))
+(defun niri-frame--title-format-has-suffix-p ()
+  "Return non-nil if `frame-title-format' already includes the
+frame-id encoding suffix."
+  (cl-some (lambda (elt)
+             (equal elt '(:eval (niri-frame--id-suffix))))
+           (if (listp frame-title-format)
+               frame-title-format
+             (list frame-title-format))))
 
-(defun niri-frame--title-has-tag-p (title)
-  "Return non-nil if TITLE contains a niri-frame tag."
-  (when title
-    (string-match-p niri-frame-tag-regexp-pattern title)))
-
-(defun niri-frame--extract-tag (title)
-  "Extract the full tag substring from TITLE, or nil if none."
-  (when title
-    (when (string-match niri-frame-tag-regexp-pattern title)
-      (match-string 0 title))))
-
-(defun niri-frame--extract-counter (title)
-  "Extract the counter number from a tagged TITLE, or nil if none."
-  (when title
-    (when (string-match niri-frame-tag-regexp-pattern title)
-      (string-to-number (match-string 1 title)))))
+(defun niri-frame--enable-title-suffix ()
+  "Ensure the zero-width frame-id suffix is in `frame-title-format'.
+Idempotent: does nothing if the suffix is already present."
+  (unless (niri-frame--title-format-has-suffix-p)
+    (setq frame-title-format
+          `(,frame-title-format
+            (:eval (niri-frame--id-suffix))))))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-;;; Frame title injection / removal
+;;; modify-frame-parameters advice (explicit frame names)
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-(defun niri-frame--inject-tag (frame tag)
-  "Inject TAG into FRAME's window title.
+(defun niri-frame--after-modify-frame-params (frame alist)
+  "After `modify-frame-parameters', ensure title includes frame-id.
 
-Sets the frame's `name' parameter to include TAG.  The tag is also
-stored in the frame parameter `niri-frame-tag' for lookup.
+When `name' is set (non-nil) and `title' is not also being set,
+update `title' to include the zero-width encoded frame-id so that
+frames with explicit names also carry the encoding in their Wayland
+window title.
 
-FRAME must be a live frame."
-  ;; Store the tag on the frame itself
-  (set-frame-parameter frame 'niri-frame-tag tag)
-  ;; Save the current effective title so we can restore it after mapping.
-  ;; On PGTK, (frame-parameter frame 'name) always returns the effective
-  ;; Wayland window title — whether it was explicitly set or computed from
-  ;; frame-title-format.  Saving and restoring this value means custom
-  ;; names survive intact, and computed titles are restored as-is.
-  (set-frame-parameter frame 'niri-frame-orig-name
-                       (frame-parameter frame 'name))
-  ;; Save whether the name was explicitly set by the user, so we can
-  ;; restore dynamic title computation for non-explicit names.
-  (set-frame-parameter frame 'niri-frame-explicit-name-p
-                       (frame-parameter frame 'explicit-name))
-  ;; Compute a base title by reading the current computed title
-  (let* ((base-title (or (frame-parameter frame 'title)
-                         (with-selected-frame frame
-                           (format-mode-line frame-title-format))))
-         (tagged-title (concat (string-trim-right base-title)
-                               " " tag)))
-    (modify-frame-parameters frame `((name . ,tagged-title))))
-  ;; Store in the lookup table
-  (puthash tag frame niri-frame--tag-to-frame))
+When `name' is cleared (nil), clear `title' so that
+`frame-title-format' takes over again (it already includes the
+encoding suffix)."
+  (let ((name-entry (assq 'name alist))
+        (title-entry (assq 'title alist)))
+    (when name-entry
+      (if (cdr name-entry)
+          ;; Explicit name set: inject encoding via 'title if not
+          ;; also being set explicitly.
+          (unless title-entry
+            (set-frame-parameter
+             frame 'title
+             (concat (niri-frame--strip-encoding (cdr name-entry))
+                     (niri-frame--frame-id-encode (frame-id frame)))))
+        ;; Name cleared: clear 'title so frame-title-format takes over,
+        ;; unless 'title is also explicitly set in the same call.
+        (unless title-entry
+          (set-frame-parameter frame 'title nil))))))
 
-(defun niri-frame--remove-tag (frame)
-  "Remove the injected tag from FRAME's window title.
-
-Restores the frame's original effective `name' (saved before
-tag injection).  Also cleans up internal state."
-  (let ((tag (frame-parameter frame 'niri-frame-tag)))
-    (when tag
-      (remhash tag niri-frame--tag-to-frame)
-      (set-frame-parameter frame 'niri-frame-tag nil)))
-  ;; Restore the original effective title.
-  ;; If the name was explicitly set before tag injection, restore it.
-  ;; If it was dynamically computed (from frame-title-format), reset
-  ;; it so it recomputes — otherwise the title freezes at whatever
-  ;; was showing at tag injection time.
-  (let ((orig-name (frame-parameter frame 'niri-frame-orig-name))
-        (was-explicit (frame-parameter frame 'niri-frame-explicit-name-p)))
-    (if was-explicit
-        (set-frame-parameter frame 'name orig-name)
-      (set-frame-parameter frame 'name nil))
-    (set-frame-parameter frame 'niri-frame-orig-name nil)
-    (set-frame-parameter frame 'niri-frame-explicit-name-p nil)))
+(defun niri-frame--inject-title-suffix-on-frame (frame)
+  "Ensure FRAME's Wayland title includes the frame-id encoding.
+For frames with an explicit name: sets the `title' parameter to
+name + zero-width encoded frame-id.
+For frames without an explicit name: does nothing (the encoding
+comes from `frame-title-format')."
+  (when (frame-parameter frame 'explicit-name)
+    (let* ((name (or (frame-parameter frame 'name) ""))
+           (clean-name (niri-frame--strip-encoding name)))
+      (set-frame-parameter
+       frame 'title
+       (concat clean-name
+               (niri-frame--frame-id-encode (frame-id frame)))))))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;;; Frame creation / deletion hooks
@@ -190,72 +220,88 @@ tag injection).  Also cleans up internal state."
 
 (defun niri-frame--on-frame-created (frame)
   "Called when a new FRAME is created.
-Injects a unique tag into the frame's title.
+Ensures the Wayland window title includes the frame-id encoding.
 
-If the niri event stream has died, disables frame tracking silently
-(rather than leaving stale tags in frame titles)."
+Even though `modify-frame-parameters' advice fires during
+`make-frame', the GTK widget may not exist yet at that point,
+making `x_set_title' a no-op.  By the time
+`after-make-frame-functions' runs, the widget exists, so we
+can reliably set the Wayland title.
+
+If niri connection has died, disable tracking silently."
   (when niri-frame--enabled
     (if (niri-frame--connection-alive-p)
-        (let* ((counter (niri-frame--next-counter))
-               (tag (niri-frame--make-tag counter)))
-          (niri-frame--inject-tag frame tag))
-      ;; Connection lost — disable tracking so we don't leave
-      ;; tags stuck in frame titles.  niri-frame-disable cleans
-      ;; up all state (hooks, hash tables, existing frame titles).
+        (let* ((raw-name (or (frame-parameter frame 'name) ""))
+               (clean-name (niri-frame--strip-encoding raw-name))
+               (encoded (concat clean-name
+                                (niri-frame--frame-id-encode (frame-id frame)))))
+          ;; Set title to trigger x_set_title on the now-existing
+          ;; GTK widget.  This sends the encoding to niri via Wayland.
+          (set-frame-parameter frame 'title encoded)
+          ;; Flush pending GDK events so niri sees the title
+          (sit-for 0))
+      ;; Connection lost — disable tracking.
       (lwarn 'niri-frame :warning
              "niri event stream lost; disabling frame tracking")
       (niri-frame-disable))))
 
 (defun niri-frame--on-frame-deleted (frame)
   "Called when FRAME is deleted.
-Cleans up any mappings involving this frame.
-
-Because the frame itself is going away, we don't need to restore
-the original name — we just clear our internal bookkeeping."
+Cleans up any mappings involving this frame."
   (when niri-frame--enabled
-    (let ((tag (frame-parameter frame 'niri-frame-tag)))
-      (when tag
-        (remhash tag niri-frame--tag-to-frame)))
     (let ((niri-id (gethash frame niri-frame--frame-to-niri-id)))
       (when niri-id
         (remhash niri-id niri-frame--niri-id-to-frame)
         (remhash frame niri-frame--frame-to-niri-id)))))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-;;; Event stream processing
+;;; Event stream processing: matching niri windows to Emacs frames
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-(defun niri-frame--match-window-to-frame (window)
-  "Try to match WINDOW (a niri-rpc-window struct) to an Emacs frame.
+(defun niri-frame--find-frame-by-title (title)
+  "Find the Emacs frame whose frame-id matches the zero-width encoding in TITLE.
+Returns the frame, or nil if no matching frame is found."
+  (let ((id (niri-frame--frame-id-decode title)))
+    (when id
+      (cl-find-if (lambda (f) (and (frame-live-p f)
+                                   (= (frame-id f) id)))
+                  (frame-list)))))
+
+(defun niri-frame--match-window (window)
+  "Try to match a niri WINDOW to an Emacs frame.
 
 If the window's PID matches our Emacs PID and its title contains
-a known tag, establish the bidirectional mapping, remove the tag
-from the frame's title, and return the frame.
-
+a zero-width encoded frame-id, establish the bidirectional mapping.
 Returns the matched frame, or nil if no match."
   (let ((pid (niri-rpc-window-pid window))
         (title (niri-rpc-window-title window))
         (niri-id (niri-rpc-window-id window)))
     (when (and pid
                (= pid (emacs-pid))
-               title
-               (niri-frame--title-has-tag-p title))
-      (let* ((tag (niri-frame--extract-tag title))
-             (frame (gethash tag niri-frame--tag-to-frame)))
-        (when (and frame (frame-live-p frame))
-          ;; Establish bidirectional mapping
-          (puthash frame niri-id niri-frame--frame-to-niri-id)
-          (puthash niri-id frame niri-frame--niri-id-to-frame)
-          ;; Remove the tag from the frame title
-          (niri-frame--remove-tag frame)
+               title)
+      (let ((frame (niri-frame--find-frame-by-title title)))
+        (when frame
+          ;; Avoid duplicate mapping work
+          (unless (eq (gethash frame niri-frame--frame-to-niri-id) niri-id)
+            ;; Clean up any previous mapping for this frame
+            (let ((old-id (gethash frame niri-frame--frame-to-niri-id)))
+              (when old-id
+                (remhash old-id niri-frame--niri-id-to-frame)))
+            ;; Clean up any previous mapping for this niri id
+            (let ((old-frame (gethash niri-id niri-frame--niri-id-to-frame)))
+              (when (and old-frame (not (eq old-frame frame)))
+                (remhash old-frame niri-frame--frame-to-niri-id)))
+            ;; Establish bidirectional mapping
+            (puthash frame niri-id niri-frame--frame-to-niri-id)
+            (puthash niri-id frame niri-frame--niri-id-to-frame))
           frame)))))
 
 (defun niri-frame--on-niri-event (event)
   "Process a niri event to detect and map Emacs frames.
 
 Handles:
-  `windows-changed'     — scan all windows for tagged Emacs frames.
-  `window-opened-or-changed' — check if the window matches a tagged frame.
+  `windows-changed'     — scan all windows for Emacs frames.
+  `window-opened-or-changed' — check if the window matches an Emacs frame.
   `window-closed'       — clean up mapping if a tracked window is closed.
 
 Guard: if frame tracking has been disabled (e.g. due to connection
@@ -263,36 +309,17 @@ loss), silently ignores the event."
   (when niri-frame--enabled
     (pcase (niri-rpc-event-type event)
       ('windows-changed
-       ;; Scan all current windows for tagged ones
        (dolist (win (niri-rpc-event-windows event))
-         (niri-frame--match-window-to-frame win)))
+         (niri-frame--match-window win)))
 
       ('window-opened-or-changed
-       (let ((win (niri-rpc-event-window event)))
-         (niri-frame--match-window-to-frame win)))
+       (niri-frame--match-window (niri-rpc-event-window event)))
 
       ('window-closed
        (let ((niri-id (niri-rpc-event-window-id event)))
          (when-let* ((frame (gethash niri-id niri-frame--niri-id-to-frame)))
            (remhash niri-id niri-frame--niri-id-to-frame)
            (remhash frame niri-frame--frame-to-niri-id)))))))
-
-;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-;;; Tagging existing frames
-;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-(defun niri-frame--tag-existing-frames ()
-  "Inject tags into all existing Emacs frames that don't have one.
-
-Changing frame titles will cause niri to emit WindowOpenedOrChanged
-events, which our event hook will catch asynchronously to establish
-the window↔frame mappings."
-  (dolist (frame (frame-list))
-    (unless (or (frame-parameter frame 'niri-frame-tag)
-                (gethash frame niri-frame--frame-to-niri-id))
-      (let* ((counter (niri-frame--next-counter))
-             (tag (niri-frame--make-tag counter)))
-        (niri-frame--inject-tag frame tag)))))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;;; Public API
@@ -302,12 +329,14 @@ the window↔frame mappings."
 (defun niri-frame-enable ()
   "Enable frame-to-niri-window tracking.
 
-Adds hooks for frame creation/deletion and niri events.
-Tags all existing frames with unique identifiers and watches for
-the corresponding WindowOpenedOrChanged events from niri.
+Modifies `frame-title-format' to append an invisible zero-width
+encoding of each frame's `frame-id' to its Wayland window title.
+Registers niri event hooks that decode the frame-id from window
+titles reported by niri, establishing a bidirectional mapping.
 
-After the events arrive, bidirectional mappings are established
-and the frame titles are restored to normal.
+Also installs advice on `modify-frame-parameters' so that frames
+with explicit names (which bypass `frame-title-format') also get
+the encoding in their titles.
 
 Requires that `niri-rpc-connect' has been called first."
   (interactive)
@@ -320,27 +349,56 @@ Requires that `niri-rpc-connect' has been called first."
   (setq niri-frame--enabled t)
 
   ;; Reset internal state
-  (setq niri-frame--counter 0)
-  (clrhash niri-frame--tag-to-frame)
   (clrhash niri-frame--frame-to-niri-id)
   (clrhash niri-frame--niri-id-to-frame)
 
-  ;; Register hooks
+  ;; 1. Add invisible frame-id suffix to frame-title-format
+  (niri-frame--enable-title-suffix)
+
+  ;; 2. Install advice for explicit frame names
+  (unless (advice-member-p #'niri-frame--after-modify-frame-params
+                           'modify-frame-parameters)
+    (advice-add 'modify-frame-parameters :after
+                #'niri-frame--after-modify-frame-params))
+
+  ;; 3. Register hooks
   (add-hook 'after-make-frame-functions #'niri-frame--on-frame-created)
   (add-hook 'delete-frame-functions #'niri-frame--on-frame-deleted)
   (add-hook 'niri-rpc-event-hook #'niri-frame--on-niri-event)
 
-  ;; Tag existing frames and try to match them
-  (niri-frame--tag-existing-frames)
+  ;; 4. Force Wayland title update on ALL existing frames.
+  ;;    Set title = effective-name + encoding for every frame.
+  ;;    This triggers x_set_title on PGTK which pushes the encoded
+  ;;    title to niri immediately.  Future name changes (buffer
+  ;;    switches, etc.) update the Wayland title via x_set_name
+  ;;    with frame-title-format which already includes the suffix.
+  (dolist (frame (frame-list))
+    (let* ((raw-name (or (frame-parameter frame 'name) ""))
+           (clean-name (niri-frame--strip-encoding raw-name))
+           (encoded (concat clean-name
+                            (niri-frame--frame-id-encode (frame-id frame)))))
+      (set-frame-parameter frame 'title encoded)))
+  ;; Flush pending GDK/Wayland events so niri sees our title updates
+  (sit-for 0)
 
-  (message "niri-frame: enabled (%d frame(s) tagged)"
-           (hash-table-count niri-frame--tag-to-frame)))
+  ;; 5. Scan existing niri windows for any that already match
+  ;;    (covers the case where titles already had encoding, e.g. on re-enable)
+  (dolist (win (niri-rpc-windows))
+    (niri-frame--match-window win))
+
+  (let ((mapped (hash-table-count niri-frame--frame-to-niri-id))
+        (total (length (frame-list))))
+    (message "niri-frame: enabled (%d/%d frame(s) mapped so far)"
+             mapped total)))
 
 ;;;###autoload
 (defun niri-frame-disable ()
   "Disable frame-to-niri-window tracking.
 
-Removes hooks and restores frame titles to normal."
+Removes the advice on `modify-frame-parameters' and clears the
+`title' parameter on frames with explicit names so they return
+to using `frame-title-format' (which still includes the encoding
+suffix, but that's invisible and harmless)."
   (interactive)
   (setq niri-frame--enabled nil)
 
@@ -349,13 +407,17 @@ Removes hooks and restores frame titles to normal."
   (remove-hook 'delete-frame-functions #'niri-frame--on-frame-deleted)
   (remove-hook 'niri-rpc-event-hook #'niri-frame--on-niri-event)
 
-  ;; Restore all tagged frame titles
-  (dolist (frame (frame-list))
-    (when (frame-parameter frame 'niri-frame-tag)
-      (niri-frame--remove-tag frame)))
+  ;; Remove advice
+  (advice-remove 'modify-frame-parameters
+                 #'niri-frame--after-modify-frame-params)
 
-  ;; Clear state
-  (clrhash niri-frame--tag-to-frame)
+  ;; Clear title overrides on frames with explicit names
+  ;; so frame-title-format takes over again.
+  (dolist (frame (frame-list))
+    (when (frame-parameter frame 'explicit-name)
+      (set-frame-parameter frame 'title nil)))
+
+  ;; Clear mappings
   (clrhash niri-frame--frame-to-niri-id)
   (clrhash niri-frame--niri-id-to-frame)
 
@@ -386,14 +448,11 @@ FRAME defaults to the selected frame."
 
 ;;;###autoload
 (defun niri-frame-pending-frames ()
-  "Return a list of frames waiting for niri event matching.
-These frames have been tagged but their corresponding niri window
-has not yet been detected."
+  "Return a list of live frames that have not yet been mapped to a niri window."
   (let ((result nil))
-    (maphash
-     (lambda (_tag frame)
-       (push frame result))
-     niri-frame--tag-to-frame)
+    (dolist (frame (frame-list))
+      (unless (gethash frame niri-frame--frame-to-niri-id)
+        (push frame result)))
     (nreverse result)))
 
 (provide 'niri-frame)

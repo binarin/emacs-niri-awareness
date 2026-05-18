@@ -59,10 +59,11 @@ Example:
                 (= (hash-table-count niri-rpc--windows) 0))
       (accept-process-output niri-rpc--async-process 0.1)))
   (niri-frame-enable)
+  (sit-for 0.1)
   (let ((start (float-time)))
-    (while (and (< (- (float-time) start) 2.0)
-                (> (hash-table-count niri-frame--tag-to-frame) 0))
-      (accept-process-output niri-rpc--async-process 0.05)))
+    (while (and (< (- (float-time) start) 3.0)
+                (niri-frame-pending-frames))
+      (accept-process-output niri-rpc--async-process 0.1)))
   (track-niri-frame-visibility-mode 1))
 
 (defun niri-frame-visible-test--teardown ()
@@ -78,11 +79,12 @@ Example:
       (accept-process-output niri-rpc--async-process 0.05))))
 
 (defun niri-frame-visible-test--wait-for-mapping (timeout)
-  "Wait up to TIMEOUT seconds for pending tags to be matched."
+  "Wait up to TIMEOUT seconds for pending frames to be mapped to niri windows."
   (let ((start (float-time)))
+    (sit-for 0.05)
     (while (and (< (- (float-time) start) timeout)
-                (> (hash-table-count niri-frame--tag-to-frame) 0))
-      (accept-process-output niri-rpc--async-process 0.05))))
+                (niri-frame-pending-frames))
+      (accept-process-output niri-rpc--async-process 0.1))))
 
 ;; ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ;; Tests: Customization
@@ -1001,6 +1003,17 @@ Returns a string with PASS/FAIL lines and a summary."
         (output nil))
     (dolist (test-name tests)
       ;; Clean slate before each test
+      (ignore-errors (track-niri-frame-visibility-mode -1))
+      (ignore-errors (niri-frame-disable))
+      ;; Delete all extra frames except one
+      (let ((frames (frame-list)))
+        (when (> (length frames) 1)
+          (dolist (f (cdr frames))
+            (ignore-errors (delete-frame f)))))
+      ;; Reset the remaining frame
+      (let ((f (car (frame-list))))
+        (ignore-errors (set-frame-parameter f 'name nil))
+        (ignore-errors (set-frame-parameter f 'title nil)))
       (ignore-errors (niri-rpc-disconnect))
       (when niri-rpc--async-process
         (while (accept-process-output niri-rpc--async-process 0.01)))

@@ -30,13 +30,14 @@ rpc_unit=(
   niri-rpc-json-null-names
 )
 
-# Tests from niri-frame-test.el (tag extraction/formatting, no niri needed):
+# Tests from niri-frame-test.el (zero-width encoding, no niri needed):
 frame_unit=(
-  niri-frame-tag-format
-  niri-frame-tag-extraction
-  niri-frame-tag-no-match
-  niri-frame-tag-nil-title
-  niri-frame-remove-tag-restores-dynamic-title
+  niri-frame-zws-encode-format
+  niri-frame-zws-encode-decode-roundtrip
+  niri-frame-zws-encode-zero
+  niri-frame-zws-decode-no-encoding
+  niri-frame-zws-decode-nil-title
+  niri-frame-zws-id-suffix-uses-selected-frame
 )
 
 # Tests from niri-frame-visible-test.el (rect math, advice unit logic):
